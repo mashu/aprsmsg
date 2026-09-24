@@ -4,7 +4,9 @@
 //! returned [`Action`]s (transmit an info field, show UI, quit).
 
 use std::collections::HashMap;
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::time::Duration;
+
+use web_time::{Instant, SystemTime, UNIX_EPOCH};
 
 use crate::aprs::{self, Message};
 use crate::ax25::Address;

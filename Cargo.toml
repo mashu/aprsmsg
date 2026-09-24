@@ -28,6 +28,7 @@ cli = []
 bridge = ["dep:tokio", "dep:tokio-tungstenite", "dep:futures-util"]
 
 [dependencies]
+web-time = "1"
 tokio = { version = "1", features = ["rt-multi-thread", "net", "io-util", "macros", "sync"], optional = true }
 tokio-tungstenite = { version = "0.26", optional = true }
 futures-util = { version = "0.3", optional = true }

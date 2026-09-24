@@ -3,10 +3,9 @@
 //! Networking stays in JavaScript (WebSocket). This module parses KISS or
 //! APRS-IS frames, runs retries/acks, and returns JSON actions to apply.
 
-use std::time::Instant;
-
 use serde::Serialize;
 use wasm_bindgen::prelude::*;
+use web_time::Instant;
 
 use crate::ax25::{Address, UiFrame};
 use crate::client::{Action, Client, ClientConfig, UiMsg};

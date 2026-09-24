@@ -20,10 +20,9 @@ msg EMAIL-2 friend@example.com Hello from APRS-IS
 
 ## Browser
 
-APRS-IS from HTTPS pages needs **WSS** (browsers cannot open plain TCP `:14580`). Default: `wss://ametx.com:8888`.
+| Mode | WebSocket URL | Bridge? |
+| --- | --- | --- |
+| APRS-IS | `wss://ametx.com:8888` | no |
+| Direwolf | `ws://127.0.0.1:8765` | yes — `cargo run --bin aprsmsg-bridge` |
 
-For Direwolf, run a local bridge, then connect the web UI to `ws://127.0.0.1:8765`:
-
-```bash
-cargo run --bin aprsmsg-bridge
-```
+APRS-IS from HTTPS pages needs **WSS** (browsers cannot open plain TCP `:14580`). Host spelling is **ametx.com**, not amtex. The local bridge is only for Direwolf.

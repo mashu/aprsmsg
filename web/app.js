@@ -13,6 +13,7 @@ let socket = null;
 let pollTimer = null;
 let keepaliveTimer = null;
 
+/** APRS-IS needs WSS (spelling: ametx, not amtex). Bridge is Direwolf only. */
 const DEFAULTS = {
   "aprs-is": "wss://ametx.com:8888",
   kiss: "ws://127.0.0.1:8765",
@@ -37,7 +38,17 @@ function log(kind, text) {
   logEl.scrollTop = logEl.scrollHeight;
 }
 
+function runWasm(fn) {
+  try {
+    return fn();
+  } catch (e) {
+    log("error", String(e));
+    return null;
+  }
+}
+
 function applyActions(actions) {
+  if (!actions) return;
   for (const a of actions) {
     if (a.type === "send" && socket?.readyState === WebSocket.OPEN) {
       socket.send(b64ToBytes(a.data));
@@ -60,8 +71,8 @@ function setModeUi() {
   });
   hint.textContent =
     mode === "kiss"
-      ? "Run locally: cargo run --bin aprsmsg-bridge  (Direwolf KISS on 127.0.0.1:8001)"
-      : "Uses APRS-IS WebSocket (WSS). Browsers cannot open plain TCP :14580.";
+      ? "Direwolf: run `cargo run --bin aprsmsg-bridge`, then Connect to ws://127.0.0.1:8765"
+      : "APRS-IS: Connect to wss://ametx.com:8888 (no bridge). Do not use localhost.";
 }
 
 function disconnect() {
@@ -91,18 +102,29 @@ form.addEventListener("submit", async (ev) => {
 
   const call = form.call.value.trim();
   const mode = form.mode.value;
-  const url = form.url.value.trim();
+  let url = form.url.value.trim();
   const path = form.path.value.trim() || "none";
   const chan = Number(form.chan.value) || 0;
   const filter = form.filter.value.trim();
   const monitor = form.monitor.checked;
 
-  try {
-    session = new Session(call, mode, path, "APZRST", chan, undefined, filter, monitor);
-  } catch (e) {
-    log("error", String(e));
+  if (mode === "aprs-is" && /127\.0\.0\.1|localhost/i.test(url)) {
+    log(
+      "error",
+      "APRS-IS mode needs wss://ametx.com:8888 — the local bridge is only for Direwolf (KISS)."
+    );
+    url = DEFAULTS["aprs-is"];
+    form.url.value = url;
+  }
+  if (mode === "aprs-is" && url.startsWith("ws://") && !/127\.0\.0\.1|localhost/i.test(url)) {
+    log("error", "This page is HTTPS — use wss:// (not ws://) for APRS-IS.");
     return;
   }
+
+  session = runWasm(
+    () => new Session(call, mode, path, "APZRST", chan, undefined, filter, monitor)
+  );
+  if (!session) return;
 
   connectBtn.disabled = true;
   form.querySelectorAll("input, select").forEach((el) => {
@@ -115,17 +137,19 @@ form.addEventListener("submit", async (ev) => {
   socket.onopen = () => {
     log("info", `${call} connected to ${url}`);
     if (mode === "aprs-is") {
-      socket.send(session.loginBytes());
+      const login = runWasm(() => session.loginBytes());
+      if (login) socket.send(login);
       keepaliveTimer = setInterval(() => {
         if (socket?.readyState === WebSocket.OPEN) {
-          socket.send(session.keepaliveBytes());
+          const ka = runWasm(() => session.keepaliveBytes());
+          if (ka) socket.send(ka);
         }
       }, 280_000);
     }
     compose.hidden = false;
     disconnectBtn.disabled = false;
     pollTimer = setInterval(() => {
-      if (session) applyActions(session.poll());
+      if (session) applyActions(runWasm(() => session.poll()));
     }, 1000);
   };
 
@@ -134,10 +158,10 @@ form.addEventListener("submit", async (ev) => {
       typeof ev.data === "string"
         ? new TextEncoder().encode(ev.data)
         : new Uint8Array(ev.data);
-    applyActions(session.onBytes(bytes));
+    applyActions(runWasm(() => session.onBytes(bytes)));
   };
 
-  socket.onerror = () => log("error", "WebSocket error");
+  socket.onerror = () => log("error", `WebSocket error talking to ${url}`);
   socket.onclose = () => {
     log("info", "disconnected");
     disconnect();
@@ -154,7 +178,7 @@ compose.addEventListener("submit", (ev) => {
   if (!session) return;
   const to = compose.to.value.trim();
   const text = compose.text.value.trim();
-  applyActions(session.onCommand(`msg ${to} ${text}`));
+  applyActions(runWasm(() => session.onCommand(`msg ${to} ${text}`)));
   compose.text.value = "";
   compose.text.focus();
 });
