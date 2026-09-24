@@ -1,0 +1,592 @@
+//! Event-driven APRS messaging client shared by the CLI and the web UI.
+//!
+//! The client never touches the network: callers feed events and apply the
+//! returned [`Action`]s (transmit an info field, show UI, quit).
+
+use std::collections::HashMap;
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+
+use crate::aprs::{self, Message};
+use crate::ax25::Address;
+use crate::decode::{self, Packet};
+use crate::heard::Heard;
+
+/// First retry after 30 s, then doubling up to 4 minutes.
+pub const RETRY_BASE: Duration = Duration::from_secs(30);
+pub const MAX_RETRY_SHIFT: u32 = 3;
+pub const MAX_TRIES: u32 = 5;
+/// Digipeated copies of one message arrive within seconds; ack them once.
+pub const ACK_HOLDOFF: Duration = Duration::from_secs(10);
+pub const SEEN_TTL: Duration = Duration::from_secs(30 * 60);
+
+pub const COMMANDS: &str = "\
+commands:
+  msg CALL text   send a numbered message, retried until acknowledged
+                  e.g.  msg EMAIL-2 friend@example.com Hello from the FTX-1
+  pending         list messages still waiting for an ack
+  cancel ID|all   stop retrying a message, e.g.  cancel 784
+  mon             toggle decoded display of other stations' packets
+  raw             toggle raw packet lines under each event (debugging)
+  digis           list digipeaters heard repeating packets (radio only)
+  quit            exit (Ctrl-D exits once pending messages are settled)
+
+markers:  → sent   ↻ repeated by a digipeater   ✓ delivered   ✗ failed
+          ← message for you   · other traffic (mon)";
+
+#[derive(Clone, Debug)]
+pub struct ClientConfig {
+    pub call: Address,
+    pub path: Vec<Address>,
+    pub tocall: Address,
+    pub monitor: bool,
+    /// True when the link is Direwolf/KISS (digipeater tracking makes sense).
+    pub radio: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum UiMsg {
+    Info(String),
+    Error(String),
+    Sent {
+        to: String,
+        id: String,
+        text: String,
+        attempt: u32,
+        max: u32,
+    },
+    Retry {
+        to: String,
+        id: String,
+        attempt: u32,
+        max: u32,
+    },
+    Repeated {
+        digi: String,
+        id: String,
+    },
+    Delivered {
+        from: String,
+        id: String,
+        tries: u32,
+    },
+    Rejected {
+        from: String,
+        id: String,
+    },
+    GaveUp {
+        to: String,
+        id: String,
+        tries: u32,
+    },
+    Cancelled {
+        to: String,
+        id: String,
+    },
+    Incoming {
+        from: String,
+        text: String,
+        id: Option<String>,
+        route: String,
+    },
+    Monitor {
+        station: String,
+        summary: String,
+        route: String,
+    },
+    Raw(String),
+    Print(String),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Action {
+    /// Transmit this APRS information field on the current link.
+    Send(Vec<u8>),
+    Ui(UiMsg),
+    Quit,
+}
+
+struct Outgoing {
+    to: String,
+    id: String,
+    info: Vec<u8>,
+    tries: u32,
+    next_at: Instant,
+    heard_via: Vec<String>,
+}
+
+struct Seen {
+    first: Instant,
+    last_ack: Option<Instant>,
+}
+
+struct DigiHeard {
+    packets: u32,
+    last: Instant,
+}
+
+pub struct Client {
+    cfg: ClientConfig,
+    mycall: String,
+    next_id: u32,
+    pending: Vec<Outgoing>,
+    seen: HashMap<(String, String), Seen>,
+    digis: HashMap<String, DigiHeard>,
+    monitor: bool,
+    raw: bool,
+}
+
+impl Client {
+    pub fn new(cfg: ClientConfig) -> Client {
+        let next_id = (unix_seconds() % 1000) as u32 + 1;
+        Client {
+            mycall: cfg.call.to_string(),
+            monitor: cfg.monitor,
+            raw: false,
+            cfg,
+            next_id,
+            pending: Vec::new(),
+            seen: HashMap::new(),
+            digis: HashMap::new(),
+        }
+    }
+
+    pub fn call(&self) -> &Address {
+        &self.cfg.call
+    }
+
+    pub fn tocall(&self) -> &Address {
+        &self.cfg.tocall
+    }
+
+    pub fn path(&self) -> &[Address] {
+        &self.cfg.path
+    }
+
+    pub fn is_radio(&self) -> bool {
+        self.cfg.radio
+    }
+
+    pub fn pending_count(&self) -> usize {
+        self.pending.len()
+    }
+
+    pub fn next_deadline(&self) -> Option<Instant> {
+        self.pending.iter().map(|m| m.next_at).min()
+    }
+
+    pub fn on_heard(&mut self, heard: Heard) -> Vec<Action> {
+        let mut out = Vec::new();
+        if self.raw {
+            out.push(Action::Ui(UiMsg::Raw(format!(
+                "{}:{}",
+                heard.header(),
+                decode::printable(&heard.info)
+            ))));
+        }
+        if !heard.from_internet {
+            if let Some(digi) = heard.repeated_by() {
+                let now = Instant::now();
+                let entry = self.digis.entry(digi).or_insert(DigiHeard {
+                    packets: 0,
+                    last: now,
+                });
+                entry.packets += 1;
+                entry.last = now;
+            }
+        }
+
+        let (source, info) = aprs::unwrap_third_party(&heard.source, &heard.info);
+        if source.eq_ignore_ascii_case(&self.mycall) {
+            out.extend(self.on_own_echo(&heard, &info));
+            return out;
+        }
+        let route = heard.route();
+
+        match aprs::parse_message(&info) {
+            Some(Message::Ack { to, id }) if self.is_me(&to) => {
+                out.extend(self.on_ack(&source, &id));
+            }
+            Some(Message::Rej { to, id }) if self.is_me(&to) => {
+                out.extend(self.on_rej(&source, &id));
+            }
+            Some(Message::Text {
+                to,
+                text,
+                id,
+                reply_ack,
+            }) if self.is_me(&to) => {
+                if let Some(acked_id) = reply_ack {
+                    out.extend(self.on_ack(&source, &acked_id));
+                }
+                out.extend(self.on_text(&source, &text, id.as_deref(), &route));
+            }
+            _ if self.monitor => {
+                let mut packet = decode::decode(heard.dest_call(), &heard.info);
+                while let Packet::ThirdParty { inner, .. } = packet {
+                    packet = *inner;
+                }
+                out.push(Action::Ui(UiMsg::Monitor {
+                    station: source,
+                    summary: packet.to_string(),
+                    route,
+                }));
+            }
+            _ => {}
+        }
+        out
+    }
+
+    pub fn on_notice(&mut self, notice: &str) -> Vec<Action> {
+        if notice.contains("unverified") {
+            vec![Action::Ui(UiMsg::Error(format!(
+                "{notice} — wrong passcode? packets you send will be dropped"
+            )))]
+        } else {
+            vec![Action::Ui(UiMsg::Info(notice.to_owned()))]
+        }
+    }
+
+    /// Returns false in the last action sense via [`Action::Quit`].
+    pub fn on_command(&mut self, line: &str) -> Vec<Action> {
+        let line = line.trim();
+        let (command, rest) = match line.split_once(char::is_whitespace) {
+            Some((command, rest)) => (command, rest.trim()),
+            None => (line, ""),
+        };
+        match command.to_ascii_lowercase().as_str() {
+            "" => Vec::new(),
+            "m" | "msg" => match rest.split_once(char::is_whitespace) {
+                Some((to, text)) if !text.trim().is_empty() => self.send_message(to, text.trim()),
+                _ => vec![Action::Ui(UiMsg::Print("usage: msg CALL text".into()))],
+            },
+            "p" | "pending" => vec![Action::Ui(UiMsg::Print(self.pending_text()))],
+            "cancel" => self.cancel(rest),
+            "d" | "digis" => vec![Action::Ui(UiMsg::Print(self.digis_text()))],
+            "mon" => {
+                self.monitor = !self.monitor;
+                vec![Action::Ui(UiMsg::Info(format!(
+                    "monitor {}",
+                    on_off(self.monitor)
+                )))]
+            }
+            "raw" => {
+                self.raw = !self.raw;
+                vec![Action::Ui(UiMsg::Info(format!(
+                    "raw packets {}",
+                    on_off(self.raw)
+                )))]
+            }
+            "h" | "help" | "?" => vec![Action::Ui(UiMsg::Print(COMMANDS.to_owned()))],
+            "q" | "quit" | "exit" => vec![Action::Quit],
+            other => vec![Action::Ui(UiMsg::Print(format!(
+                "unknown command {other:?}; type help"
+            )))],
+        }
+    }
+
+    pub fn poll(&mut self, now: Instant) -> Vec<Action> {
+        let mut out = Vec::new();
+        let mut i = 0;
+        while i < self.pending.len() {
+            if self.pending[i].next_at > now {
+                i += 1;
+                continue;
+            }
+            if self.pending[i].tries >= MAX_TRIES {
+                let gave_up = self.pending.remove(i);
+                out.push(Action::Ui(UiMsg::GaveUp {
+                    to: gave_up.to,
+                    id: gave_up.id,
+                    tries: gave_up.tries,
+                }));
+                continue;
+            }
+            let info = self.pending[i].info.clone();
+            out.push(Action::Send(info));
+            let m = &mut self.pending[i];
+            m.tries += 1;
+            m.next_at = now + RETRY_BASE * 2u32.pow((m.tries - 1).min(MAX_RETRY_SHIFT));
+            out.push(Action::Ui(UiMsg::Retry {
+                to: m.to.clone(),
+                id: m.id.clone(),
+                attempt: m.tries,
+                max: MAX_TRIES,
+            }));
+            i += 1;
+        }
+        out
+    }
+
+    fn send_message(&mut self, to: &str, text: &str) -> Vec<Action> {
+        let to = to.to_ascii_uppercase();
+        let id = self.take_id();
+        let info = match aprs::format_message(&to, text, &id) {
+            Ok(info) => info,
+            Err(e) => return vec![Action::Ui(UiMsg::Error(format!("not sent: {e}")))],
+        };
+        self.pending.push(Outgoing {
+            to: to.clone(),
+            id: id.clone(),
+            info: info.clone(),
+            tries: 1,
+            next_at: Instant::now() + RETRY_BASE,
+            heard_via: Vec::new(),
+        });
+        vec![
+            Action::Send(info),
+            Action::Ui(UiMsg::Sent {
+                to,
+                id,
+                text: text.to_owned(),
+                attempt: 1,
+                max: MAX_TRIES,
+            }),
+        ]
+    }
+
+    fn take_pending(&mut self, from: &str, id: &str) -> Option<Outgoing> {
+        let pos = self
+            .pending
+            .iter()
+            .position(|m| m.id == id && m.to.eq_ignore_ascii_case(from))?;
+        Some(self.pending.remove(pos))
+    }
+
+    fn on_ack(&mut self, from: &str, id: &str) -> Vec<Action> {
+        if let Some(acked) = self.take_pending(from, id) {
+            vec![Action::Ui(UiMsg::Delivered {
+                from: from.to_owned(),
+                id: acked.id,
+                tries: acked.tries,
+            })]
+        } else {
+            Vec::new()
+        }
+    }
+
+    fn on_rej(&mut self, from: &str, id: &str) -> Vec<Action> {
+        if let Some(rejected) = self.take_pending(from, id) {
+            vec![Action::Ui(UiMsg::Rejected {
+                from: from.to_owned(),
+                id: rejected.id,
+            })]
+        } else {
+            Vec::new()
+        }
+    }
+
+    fn on_own_echo(&mut self, heard: &Heard, info: &[u8]) -> Vec<Action> {
+        let Some(digi) = heard.repeated_by() else {
+            return Vec::new();
+        };
+        let Some(Message::Text { id: Some(id), .. }) = aprs::parse_message(info) else {
+            return Vec::new();
+        };
+        if let Some(m) = self.pending.iter_mut().find(|m| m.id == id) {
+            if !m.heard_via.contains(&digi) {
+                m.heard_via.push(digi.clone());
+                return vec![Action::Ui(UiMsg::Repeated { digi, id })];
+            }
+        }
+        Vec::new()
+    }
+
+    fn on_text(&mut self, from: &str, text: &str, id: Option<&str>, route: &str) -> Vec<Action> {
+        let Some(id) = id else {
+            return vec![Action::Ui(UiMsg::Incoming {
+                from: from.to_owned(),
+                text: text.to_owned(),
+                id: None,
+                route: route.to_owned(),
+            })];
+        };
+
+        let now = Instant::now();
+        self.seen.retain(|_, seen| now.duration_since(seen.first) < SEEN_TTL);
+        let key = (from.to_ascii_uppercase(), id.to_owned());
+        let is_new = !self.seen.contains_key(&key);
+        let seen = self.seen.entry(key).or_insert(Seen {
+            first: now,
+            last_ack: None,
+        });
+        let ack_due = seen
+            .last_ack
+            .is_none_or(|last| now.duration_since(last) >= ACK_HOLDOFF);
+        if ack_due {
+            seen.last_ack = Some(now);
+        }
+
+        let mut out = Vec::new();
+        if is_new {
+            out.push(Action::Ui(UiMsg::Incoming {
+                from: from.to_owned(),
+                text: text.to_owned(),
+                id: Some(id.to_owned()),
+                route: route.to_owned(),
+            }));
+        }
+        if ack_due {
+            match aprs::format_ack(from, id) {
+                Ok(ack) => out.push(Action::Send(ack)),
+                Err(e) => out.push(Action::Ui(UiMsg::Error(format!("cannot ack {from}: {e}")))),
+            }
+        }
+        out
+    }
+
+    fn cancel(&mut self, which: &str) -> Vec<Action> {
+        let which = which.trim().trim_start_matches('#');
+        if which.is_empty() {
+            return vec![Action::Ui(UiMsg::Print(
+                "usage: cancel ID | cancel all".into(),
+            ))];
+        }
+        let all = which.eq_ignore_ascii_case("all");
+        let (cancelled, kept): (Vec<_>, Vec<_>) =
+            self.pending.drain(..).partition(|m| all || m.id == which);
+        self.pending = kept;
+        if cancelled.is_empty() {
+            return vec![Action::Ui(UiMsg::Print(format!(
+                "no pending message #{which}; type pending to list them"
+            )))];
+        }
+        cancelled
+            .into_iter()
+            .map(|m| {
+                Action::Ui(UiMsg::Cancelled {
+                    to: m.to,
+                    id: m.id,
+                })
+            })
+            .collect()
+    }
+
+    fn digis_text(&self) -> String {
+        if !self.cfg.radio {
+            return "digipeaters are only tracked on the radio link".into();
+        }
+        if self.digis.is_empty() {
+            return "no digipeaters heard yet (only stations heard directly)".into();
+        }
+        let now = Instant::now();
+        let mut heard: Vec<_> = self.digis.iter().collect();
+        heard.sort_by(|a, b| b.1.packets.cmp(&a.1.packets).then(a.0.cmp(b.0)));
+        let mut lines = Vec::new();
+        for (call, h) in heard {
+            lines.push(format!(
+                "  {call:<10} {:>4} packets, last {} s ago",
+                h.packets,
+                now.duration_since(h.last).as_secs()
+            ));
+        }
+        lines.join("\n")
+    }
+
+    fn pending_text(&self) -> String {
+        if self.pending.is_empty() {
+            return "no messages waiting for an ack".into();
+        }
+        let now = Instant::now();
+        let mut lines = Vec::new();
+        for m in &self.pending {
+            lines.push(format!(
+                "  #{} to {}: try {}/{MAX_TRIES}, next in {} s",
+                m.id,
+                m.to,
+                m.tries,
+                m.next_at.saturating_duration_since(now).as_secs()
+            ));
+        }
+        lines.join("\n")
+    }
+
+    fn is_me(&self, addressee: &str) -> bool {
+        addressee.eq_ignore_ascii_case(&self.mycall)
+    }
+
+    fn take_id(&mut self) -> String {
+        let id = self.next_id;
+        self.next_id = self.next_id % 99_999 + 1;
+        id.to_string()
+    }
+}
+
+fn on_off(flag: bool) -> &'static str {
+    if flag {
+        "on"
+    } else {
+        "off"
+    }
+}
+
+fn unix_seconds() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn cfg(call: &str) -> ClientConfig {
+        ClientConfig {
+            call: Address::parse(call).unwrap(),
+            path: vec![Address::parse("WIDE1-1").unwrap()],
+            tocall: Address::parse("APZRST").unwrap(),
+            monitor: false,
+            radio: true,
+        }
+    }
+
+    #[test]
+    fn sends_and_acks_message() {
+        let mut client = Client::new(cfg("SA0KAM-1"));
+        let actions = client.on_command("msg SM0YOS-1 hello");
+        assert!(actions.iter().any(|a| matches!(a, Action::Send(_))));
+        assert_eq!(client.pending_count(), 1);
+
+        let id = match &actions[1] {
+            Action::Ui(UiMsg::Sent { id, .. }) => id.clone(),
+            _ => panic!("expected Sent"),
+        };
+        let info = aprs::format_ack("SA0KAM-1", &id).unwrap();
+        let heard = Heard {
+            source: "SM0YOS-1".into(),
+            dest: "APRS".into(),
+            path: vec![],
+            info,
+            from_internet: true,
+        };
+        let actions = client.on_heard(heard);
+        assert!(actions.iter().any(|a| matches!(
+            a,
+            Action::Ui(UiMsg::Delivered { .. })
+        )));
+        assert_eq!(client.pending_count(), 0);
+    }
+
+    #[test]
+    fn acks_incoming_once_within_holdoff() {
+        let mut client = Client::new(cfg("SA0KAM-1"));
+        let info = aprs::format_message("SA0KAM-1", "hi", "7").unwrap();
+        let heard = Heard {
+            source: "SM0YOS-1".into(),
+            dest: "APRS".into(),
+            path: vec![],
+            info,
+            from_internet: false,
+        };
+        let first = client.on_heard(heard.clone());
+        assert_eq!(
+            first.iter().filter(|a| matches!(a, Action::Send(_))).count(),
+            1
+        );
+        let second = client.on_heard(heard);
+        assert_eq!(
+            second.iter().filter(|a| matches!(a, Action::Send(_))).count(),
+            0
+        );
+        assert!(second.iter().all(|a| !matches!(a, Action::Ui(UiMsg::Incoming { .. }))));
+    }
+}

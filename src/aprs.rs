@@ -61,7 +61,7 @@ pub fn parse_message(info: &[u8]) -> Option<Message> {
     }
     let to = String::from_utf8_lossy(&info[1..=ADDRESSEE_LEN]).trim().to_owned();
     let body = String::from_utf8_lossy(&info[ADDRESSEE_LEN + 2..]);
-    let body = body.trim_end_matches(|c| c == '\r' || c == '\n');
+    let body = body.trim_end_matches(['\r', '\n']);
 
     if let Some(id) = body.strip_prefix("ack").and_then(parse_ack_id) {
         return Some(Message::Ack { to, id });

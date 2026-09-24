@@ -1,15 +1,10 @@
-//! Terminal output: one line per event with a fixed layout
-//!
-//!   08:51:07Z ← WXBOT     Send an APRS message ...   #AB iGate SM0RGQ-4
-//!   time      │ station   text                        details (dimmed)
-//!             └ event marker
-//!
-//! ANSI colors are used only when stdout is a terminal, and never when
-//! `--no-color` is given or the NO_COLOR environment variable is set.
+//! Terminal output for the CLI: one line per [`UiMsg`](crate::client::UiMsg).
 
 use std::env;
 use std::io::{self, IsTerminal};
 use std::time::{SystemTime, UNIX_EPOCH};
+
+use crate::client::UiMsg;
 
 const CALL_WIDTH: usize = 9;
 /// Width of "08:51:07Z ← " plus the station column and its trailing space.
@@ -52,6 +47,44 @@ impl Ui {
         Ui { color }
     }
 
+    pub fn apply(&self, msg: &UiMsg) {
+        match msg {
+            UiMsg::Info(text) => self.info(text),
+            UiMsg::Error(text) => self.error(text),
+            UiMsg::Sent {
+                to,
+                id,
+                text,
+                attempt,
+                max,
+            } => self.sent(to, id, text, *attempt, *max),
+            UiMsg::Retry {
+                to,
+                id,
+                attempt,
+                max,
+            } => self.retry(to, id, *attempt, *max),
+            UiMsg::Repeated { digi, id } => self.repeated(digi, id),
+            UiMsg::Delivered { from, id, tries } => self.delivered(from, id, *tries),
+            UiMsg::Rejected { from, id } => self.rejected(from, id),
+            UiMsg::GaveUp { to, id, tries } => self.gave_up(to, id, *tries),
+            UiMsg::Cancelled { to, id } => self.cancelled(to, id),
+            UiMsg::Incoming {
+                from,
+                text,
+                id,
+                route,
+            } => self.incoming(from, text, id.as_deref(), route),
+            UiMsg::Monitor {
+                station,
+                summary,
+                route,
+            } => self.monitor(station, summary, route),
+            UiMsg::Raw(frame) => self.raw(frame),
+            UiMsg::Print(text) => println!("{text}"),
+        }
+    }
+
     fn paint(&self, style: Style, text: &str) -> String {
         if self.color && !text.is_empty() {
             format!("\x1b[{}m{text}\x1b[0m", style.sgr())
@@ -78,65 +111,103 @@ impl Ui {
         println!("{line}");
     }
 
-    // ---- general ----------------------------------------------------------
-
-    pub fn info(&self, text: &str) {
-        println!("{} {}", self.paint(Style::Dim, &stamp()), self.paint(Style::Dim, text));
+    fn info(&self, text: &str) {
+        println!(
+            "{} {}",
+            self.paint(Style::Dim, &stamp()),
+            self.paint(Style::Dim, text)
+        );
     }
 
-    pub fn error(&self, text: &str) {
-        println!("{} {}", self.paint(Style::Dim, &stamp()), self.paint(Style::Red, text));
+    fn error(&self, text: &str) {
+        println!(
+            "{} {}",
+            self.paint(Style::Dim, &stamp()),
+            self.paint(Style::Red, text)
+        );
     }
 
-    // ---- outgoing messages ------------------------------------------------
-
-    pub fn sent(&self, to: &str, id: &str, text: &str, attempt: u32, max: u32) {
-        self.event("→", Style::Cyan, to, &format!("#{id} {text}"), &format!("try {attempt}/{max}"));
+    fn sent(&self, to: &str, id: &str, text: &str, attempt: u32, max: u32) {
+        self.event(
+            "→",
+            Style::Cyan,
+            to,
+            &format!("#{id} {text}"),
+            &format!("try {attempt}/{max}"),
+        );
     }
 
-    pub fn retry(&self, to: &str, id: &str, attempt: u32, max: u32) {
-        self.event("→", Style::Cyan, to, &format!("#{id}"), &format!("retry {attempt}/{max}"));
+    fn retry(&self, to: &str, id: &str, attempt: u32, max: u32) {
+        self.event(
+            "→",
+            Style::Cyan,
+            to,
+            &format!("#{id}"),
+            &format!("retry {attempt}/{max}"),
+        );
     }
 
-    pub fn repeated(&self, digi: &str, id: &str) {
+    fn repeated(&self, digi: &str, id: &str) {
         self.event("↻", Style::Blue, digi, &format!("repeated your #{id}"), "");
     }
 
-    pub fn delivered(&self, from: &str, id: &str, tries: u32) {
+    fn delivered(&self, from: &str, id: &str, tries: u32) {
         let word = if tries == 1 { "try" } else { "tries" };
         let body = self.paint(Style::Green, &format!("#{id} delivered"));
-        self.event("✓", Style::Green, from, &body, &format!("after {tries} {word}"));
+        self.event(
+            "✓",
+            Style::Green,
+            from,
+            &body,
+            &format!("after {tries} {word}"),
+        );
     }
 
-    pub fn rejected(&self, from: &str, id: &str) {
+    fn rejected(&self, from: &str, id: &str) {
         let body = self.paint(Style::Red, &format!("#{id} rejected"));
         self.event("✗", Style::Red, from, &body, "");
     }
 
-    pub fn gave_up(&self, to: &str, id: &str, tries: u32) {
+    fn gave_up(&self, to: &str, id: &str, tries: u32) {
         let body = self.paint(Style::Red, &format!("#{id} not delivered"));
-        self.event("✗", Style::Red, to, &body, &format!("no ack after {tries} tries"));
+        self.event(
+            "✗",
+            Style::Red,
+            to,
+            &body,
+            &format!("no ack after {tries} tries"),
+        );
     }
 
-    pub fn cancelled(&self, to: &str, id: &str) {
-        self.event("✗", Style::Dim, to, &format!("#{id} cancelled"), "no more retries");
+    fn cancelled(&self, to: &str, id: &str) {
+        self.event(
+            "✗",
+            Style::Dim,
+            to,
+            &format!("#{id} cancelled"),
+            "no more retries",
+        );
     }
 
-    // ---- incoming ---------------------------------------------------------
-
-    pub fn incoming(&self, from: &str, text: &str, id: Option<&str>, route: &str) {
+    fn incoming(&self, from: &str, text: &str, id: Option<&str>, route: &str) {
         let detail = match id {
             Some(id) => format!("#{id} {route}"),
             None => route.to_owned(),
         };
-        self.event("←", Style::Yellow, from, &self.paint(Style::YellowText, text), &detail);
+        self.event(
+            "←",
+            Style::Yellow,
+            from,
+            &self.paint(Style::YellowText, text),
+            &detail,
+        );
     }
 
-    pub fn monitor(&self, station: &str, summary: &str, route: &str) {
+    fn monitor(&self, station: &str, summary: &str, route: &str) {
         self.event("·", Style::Dim, station, summary, route);
     }
 
-    pub fn raw(&self, frame: &str) {
+    fn raw(&self, frame: &str) {
         println!("{:BODY_INDENT$}{}", "", self.paint(Style::Dim, frame));
     }
 }

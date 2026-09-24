@@ -1,0 +1,44 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>aprsmsg</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <main>
+    <header>
+      <h1>aprsmsg</h1>
+      <p>APRS messaging in the browser — Direwolf via local bridge, or APRS-IS over WebSocket.</p>
+    </header>
+
+    <form id="connect" class="panel">
+      <label>Callsign <input name="call" required placeholder="SA0KAM-1" autocomplete="off"></label>
+      <label>Mode
+        <select name="mode">
+          <option value="aprs-is">APRS-IS (internet)</option>
+          <option value="kiss">Direwolf (KISS bridge)</option>
+        </select>
+      </label>
+      <label>WebSocket URL <input name="url" value="wss://ametx.com:8888" spellcheck="false"></label>
+      <label class="kiss-only hidden">Path <input name="path" value="WIDE1-1,WIDE2-1"></label>
+      <label class="kiss-only hidden">Channel <input name="chan" type="number" min="0" max="15" value="0"></label>
+      <label class="is-only">Filter <input name="filter" placeholder="r/59.33/18.07/50"></label>
+      <label class="check"><input name="monitor" type="checkbox"> Monitor other traffic</label>
+      <button type="submit" id="connect-btn">Connect</button>
+      <button type="button" id="disconnect-btn" disabled>Disconnect</button>
+    </form>
+
+    <form id="compose" class="panel" hidden>
+      <input name="to" placeholder="CALL-SSID" required autocomplete="off">
+      <input name="text" placeholder="message text" required maxlength="67" autocomplete="off">
+      <button type="submit">Send</button>
+    </form>
+
+    <div id="log" class="log" aria-live="polite"></div>
+    <p class="hint" id="hint"></p>
+  </main>
+  <script type="module" src="app.js"></script>
+</body>
+</html>

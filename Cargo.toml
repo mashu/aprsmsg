@@ -2,10 +2,45 @@
 name = "aprsmsg"
 version = "0.1.0"
 edition = "2021"
-description = "Interactive APRS messaging client for Direwolf's KISS TCP port"
+description = "Interactive APRS messaging client for Direwolf (KISS) or APRS-IS"
 license = "MIT"
+repository = "https://github.com/mashu/aprsmsg"
+readme = "README.md"
+keywords = ["aprs", "ham-radio", "direwolf", "kiss"]
+categories = ["command-line-utilities", "network-programming"]
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[[bin]]
+name = "aprsmsg"
+path = "src/bin/aprsmsg.rs"
+required-features = ["cli"]
+
+[[bin]]
+name = "aprsmsg-bridge"
+path = "src/bin/aprsmsg-bridge.rs"
+required-features = ["bridge"]
+
+[features]
+default = ["cli", "bridge"]
+cli = []
+bridge = ["dep:tokio", "dep:tokio-tungstenite", "dep:futures-util"]
 
 [dependencies]
+tokio = { version = "1", features = ["rt-multi-thread", "net", "io-util", "macros", "sync"], optional = true }
+tokio-tungstenite = { version = "0.26", optional = true }
+futures-util = { version = "0.3", optional = true }
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+wasm-bindgen = "0.2"
+serde = { version = "1", features = ["derive"] }
+serde-wasm-bindgen = "0.6"
+js-sys = "0.3"
 
 [profile.release]
 strip = true
+lto = true
+
+[package.metadata.wasm-pack.profile.release]
+wasm-opt = false
