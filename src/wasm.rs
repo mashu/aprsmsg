@@ -169,19 +169,35 @@ impl Session {
         let mut actions = Vec::new();
         while let Some(pos) = self.line_buf.iter().position(|&b| b == b'\n') {
             let mut line: Vec<u8> = self.line_buf.drain(..=pos).collect();
-            while matches!(line.last(), Some(b'\r' | b'\n')) {
-                line.pop();
-            }
-            if line.starts_with(b"#") {
-                let comment = String::from_utf8_lossy(&line[1..]).trim().to_owned();
-                if comment.starts_with("logresp") {
-                    actions.extend(self.client.on_notice(&comment));
-                }
-            } else if let Some(heard) = Heard::parse_tnc2(&line) {
-                actions.extend(self.client.on_heard(heard));
-            }
+            trim_line_end(&mut line);
+            actions.extend(self.handle_aprs_is_line(&line));
+        }
+        // javAPRSSrvr WebSocket usually sends one complete line per binary
+        // frame, often without a trailing newline — flush the remainder.
+        if !self.line_buf.is_empty() {
+            let mut line = std::mem::take(&mut self.line_buf);
+            trim_line_end(&mut line);
+            actions.extend(self.handle_aprs_is_line(&line));
         }
         actions
+    }
+
+    fn handle_aprs_is_line(&mut self, line: &[u8]) -> Vec<Action> {
+        if line.is_empty() {
+            return Vec::new();
+        }
+        if line.starts_with(b"#") {
+            let comment = String::from_utf8_lossy(&line[1..]).trim().to_owned();
+            if comment.is_empty() {
+                return Vec::new();
+            }
+            // Always surface server/login remarks (verified, filter, etc.).
+            return self.client.on_notice(&comment);
+        }
+        match Heard::parse_tnc2(line) {
+            Some(heard) => self.client.on_heard(heard),
+            None => Vec::new(),
+        }
     }
 
     fn encode_actions(&self, actions: Vec<Action>) -> Vec<JsAction> {
@@ -286,6 +302,12 @@ fn format_ui(msg: &UiMsg) -> String {
 
 fn to_js(actions: Vec<JsAction>) -> Result<JsValue, JsValue> {
     serde_wasm_bindgen::to_value(&actions).map_err(|e| JsValue::from_str(&e.to_string()))
+}
+
+fn trim_line_end(line: &mut Vec<u8>) {
+    while matches!(line.last(), Some(b'\r' | b'\n')) {
+        line.pop();
+    }
 }
 
 fn base64_encode(data: &[u8]) -> String {

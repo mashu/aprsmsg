@@ -1,4 +1,4 @@
-import init, { Session } from "./pkg/aprsmsg.js?v=3";
+import init, { Session } from "./pkg/aprsmsg.js?v=4";
 
 const $ = (sel) => document.querySelector(sel);
 const form = $("#connect");
@@ -16,6 +16,7 @@ let session = null;
 let socket = null;
 let pollTimer = null;
 let keepaliveTimer = null;
+let linkMode = null;
 
 const DEFAULTS = {
   "aprs-is": "wss://ametx.com:8888",
@@ -107,7 +108,12 @@ function applyActions(actions) {
   if (!actions) return;
   for (const a of actions) {
     if (a.type === "send" && socket?.readyState === WebSocket.OPEN) {
-      socket.send(b64ToBytes(a.data));
+      const bytes = b64ToBytes(a.data);
+      if (linkMode === "aprs-is") {
+        socket.send(new TextDecoder().decode(bytes));
+      } else {
+        socket.send(bytes);
+      }
     } else if (a.type === "log") {
       log(a.kind, a.text);
     } else if (a.type === "quit") {
@@ -141,6 +147,7 @@ function disconnect() {
     socket = null;
   }
   session = null;
+  linkMode = null;
   compose.hidden = true;
   connectBtn.disabled = false;
   connectBtn.textContent = "Connect";
@@ -185,6 +192,7 @@ function wireUi() {
       () => new Session(call, mode, path, "APZRST", chan, undefined, filter, monitor)
     );
     if (!session) return;
+    linkMode = mode;
 
     connectBtn.disabled = true;
     connectBtn.textContent = "Connecting…";
@@ -200,11 +208,14 @@ function wireUi() {
       log("info", `${call} ↔ ${url}`);
       if (mode === "aprs-is") {
         const login = runWasm(() => session.loginBytes());
-        if (login) socket.send(login);
+        if (login) {
+          // Text frame is accepted by javAPRSSrvr and avoids binary encoding quirks.
+          socket.send(new TextDecoder().decode(login));
+        }
         keepaliveTimer = setInterval(() => {
           if (socket?.readyState === WebSocket.OPEN) {
             const ka = runWasm(() => session.keepaliveBytes());
-            if (ka) socket.send(ka);
+            if (ka) socket.send(new TextDecoder().decode(ka));
           }
         }, 280_000);
       }
@@ -218,10 +229,17 @@ function wireUi() {
     };
 
     socket.onmessage = (ev) => {
-      const bytes =
-        typeof ev.data === "string"
-          ? new TextEncoder().encode(ev.data)
-          : new Uint8Array(ev.data);
+      let bytes;
+      if (typeof ev.data === "string") {
+        bytes = new TextEncoder().encode(ev.data);
+      } else if (ev.data instanceof Blob) {
+        ev.data.arrayBuffer().then((buf) => {
+          applyActions(runWasm(() => session.onBytes(new Uint8Array(buf))));
+        });
+        return;
+      } else {
+        bytes = new Uint8Array(ev.data);
+      }
       applyActions(runWasm(() => session.onBytes(bytes)));
     };
 
