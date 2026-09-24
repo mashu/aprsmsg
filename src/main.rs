@@ -1,24 +1,31 @@
-//! aprsmsg — interactive APRS messaging client for Direwolf's KISS TCP port.
+//! aprsmsg — interactive APRS messaging client.
 //!
-//! Sends numbered messages and retries them until acknowledged, automatically
-//! acknowledges messages addressed to you (including ones relayed from the
-//! internet by iGates), and can monitor all received traffic.
+//! Talks to the APRS network either by radio, through Direwolf's KISS TCP
+//! port, or over the internet, through an APRS-IS server. Sends numbered
+//! messages and retries them until acknowledged, automatically acknowledges
+//! messages addressed to you, decodes other stations' traffic in monitor
+//! mode, and keeps track of which digipeaters you can hear.
 
 mod aprs;
 mod ax25;
+mod decode;
 mod kiss;
+mod link;
+mod ui;
 
 use std::collections::HashMap;
 use std::env;
-use std::io::{self, BufRead, Read, Write};
-use std::net::TcpStream;
+use std::io::{self, BufRead};
 use std::process;
 use std::sync::mpsc::{self, RecvTimeoutError, Sender};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use aprs::Message;
-use ax25::{Address, UiFrame};
+use ax25::Address;
+use decode::Packet;
+use link::{AprsIsLogin, Heard, Link, LinkEvent};
+use ui::Ui;
 
 /// First retry after 30 s, then doubling up to 4 minutes.
 const RETRY_BASE: Duration = Duration::from_secs(30);
@@ -30,45 +37,75 @@ const SEEN_TTL: Duration = Duration::from_secs(30 * 60);
 /// After stdin closes and all messages settle, keep acking late replies.
 const LINGER: Duration = Duration::from_secs(30);
 const IDLE_WAIT: Duration = Duration::from_secs(3600);
+const DEFAULT_KISS: &str = "127.0.0.1:8001";
+const DEFAULT_APRS_IS: &str = "euro.aprs2.net:14580";
 
 const USAGE: &str = "\
-usage: aprsmsg --call MYCALL [--kiss HOST:PORT] [--chan N] [--path P] [--tocall T] [--monitor]
+usage: aprsmsg --call MYCALL [radio or internet options] [--monitor] [--no-color]
 
-  --call MYCALL     your callsign-SSID, e.g. SA0KAM-1       (required)
-  --kiss HOST:PORT  Direwolf KISS TCP port                  (default 127.0.0.1:8001)
-  --chan N          radio channel, 0 = first                (default 0)
-  --path P          digipeater path, or \"none\"              (default WIDE1-1,WIDE2-1)
-  --tocall T        AX.25 destination (software identifier) (default APZRST)
-  --monitor         show every received packet from the start";
+  --call MYCALL      your callsign-SSID, e.g. SA0KAM-1        (required)
+
+radio (default), through Direwolf:
+  --kiss HOST:PORT   Direwolf KISS TCP port                   (default 127.0.0.1:8001)
+  --chan N           radio channel, 0 = first                 (default 0)
+  --path P           digipeater path, or \"none\"               (default WIDE1-1,WIDE2-1)
+
+internet, no radio needed:
+  --aprs-is          connect to an APRS-IS server instead of Direwolf
+  --server HOST:PORT APRS-IS server                           (default euro.aprs2.net:14580)
+  --passcode N       APRS-IS passcode                         (default: computed from --call)
+  --filter F         extra server filter for the monitor, e.g. r/59.33/18.07/50
+                     (messages to MYCALL are always received)
+
+common:
+  --tocall T         AX.25 destination (software identifier)  (default APZRST)
+  --monitor          show other stations' packets from the start
+  --no-color         plain output (also when NO_COLOR is set or output is piped)";
 
 const COMMANDS: &str = "\
 commands:
   msg CALL text   send a numbered message, retried until acknowledged
                   e.g.  msg EMAIL-2 friend@example.com Hello from the FTX-1
   pending         list messages still waiting for an ack
-  mon             toggle monitoring of all received packets
-  quit            exit (Ctrl-D exits once pending messages are settled)";
+  cancel ID|all   stop retrying a message, e.g.  cancel 784
+  mon             toggle decoded display of other stations' packets
+  raw             toggle raw packet lines under each event (debugging)
+  digis           list digipeaters heard repeating packets (radio only)
+  quit            exit (Ctrl-D exits once pending messages are settled)
+
+markers:  → sent   ↻ repeated by a digipeater   ✓ delivered   ✗ failed
+          ← message for you   · other traffic (mon)";
 
 // ---------------------------------------------------------------------------
 // Configuration
 // ---------------------------------------------------------------------------
 
+enum Transport {
+    Radio { kiss: String, chan: u8 },
+    Internet { server: String, passcode: u16, filter: String },
+}
+
 struct Config {
     call: Address,
-    kiss: String,
-    chan: u8,
+    transport: Transport,
     path: Vec<Address>,
     tocall: Address,
     monitor: bool,
+    no_color: bool,
 }
 
 fn parse_args() -> Result<Config, String> {
     let mut call = None;
-    let mut kiss = String::from("127.0.0.1:8001");
+    let mut kiss = String::from(DEFAULT_KISS);
     let mut chan: u8 = 0;
     let mut path = String::from("WIDE1-1,WIDE2-1");
+    let mut aprs_is = false;
+    let mut server = String::from(DEFAULT_APRS_IS);
+    let mut passcode: Option<u16> = None;
+    let mut filter = String::new();
     let mut tocall = String::from("APZRST");
     let mut monitor = false;
+    let mut no_color = false;
 
     let mut args = env::args().skip(1);
     while let Some(arg) = args.next() {
@@ -83,8 +120,19 @@ fn parse_args() -> Result<Config, String> {
                     .ok_or("--chan must be 0-15")?
             }
             "--path" => path = value_of(&mut args, "--path")?,
+            "--aprs-is" => aprs_is = true,
+            "--server" => server = value_of(&mut args, "--server")?,
+            "--passcode" => {
+                passcode = Some(
+                    value_of(&mut args, "--passcode")?
+                        .parse()
+                        .map_err(|_| "--passcode must be a number")?,
+                )
+            }
+            "--filter" => filter = value_of(&mut args, "--filter")?,
             "--tocall" => tocall = value_of(&mut args, "--tocall")?,
             "--monitor" => monitor = true,
+            "--no-color" => no_color = true,
             "-h" | "--help" => {
                 println!("{USAGE}\n\n{COMMANDS}");
                 process::exit(0);
@@ -103,50 +151,46 @@ fn parse_args() -> Result<Config, String> {
         return Err("--path allows at most 8 digipeaters".into());
     }
     let tocall = Address::parse(&tocall)?;
+    let transport = if aprs_is {
+        Transport::Internet {
+            server,
+            passcode: passcode.unwrap_or_else(|| link::passcode(&call.call)),
+            filter: format!("g/{call} {filter}").trim().to_owned(),
+        }
+    } else {
+        Transport::Radio { kiss, chan }
+    };
 
-    Ok(Config { call, kiss, chan, path, tocall, monitor })
+    Ok(Config { call, transport, path, tocall, monitor, no_color })
 }
 
 fn value_of(args: &mut impl Iterator<Item = String>, name: &str) -> Result<String, String> {
     args.next().ok_or(format!("{name} needs a value"))
 }
 
+fn open_link(cfg: &Config) -> io::Result<(Link, String)> {
+    match &cfg.transport {
+        Transport::Radio { kiss, chan } => {
+            let link = Link::kiss(kiss, *chan)?;
+            Ok((link, format!("radio via Direwolf {kiss}, channel {chan}")))
+        }
+        Transport::Internet { server, passcode, filter } => {
+            let call = cfg.call.to_string();
+            let login = AprsIsLogin { server, call: &call, passcode: *passcode, filter };
+            let link = Link::aprs_is(&login)?;
+            Ok((link, format!("APRS-IS {server}, filter {filter}")))
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
-// Events from the reader and stdin threads
+// Events from the link and stdin threads
 // ---------------------------------------------------------------------------
 
 enum Event {
-    Frame(UiFrame),
+    Link(LinkEvent),
     Line(String),
     InputClosed,
-    LinkClosed(String),
-}
-
-fn spawn_kiss_reader(mut stream: TcpStream, chan: u8, events: Sender<Event>) {
-    thread::spawn(move || {
-        let mut decoder = kiss::Decoder::default();
-        let mut buf = [0u8; 4096];
-        let reason = loop {
-            match stream.read(&mut buf) {
-                Ok(0) => break "Direwolf closed the KISS connection".to_owned(),
-                Ok(n) => {
-                    for kiss_frame in decoder.push(&buf[..n]) {
-                        if kiss_frame.channel != chan {
-                            continue;
-                        }
-                        if let Some(frame) = UiFrame::decode(&kiss_frame.payload) {
-                            if events.send(Event::Frame(frame)).is_err() {
-                                return;
-                            }
-                        }
-                    }
-                }
-                Err(e) if e.kind() == io::ErrorKind::Interrupted => {}
-                Err(e) => break format!("KISS connection error: {e}"),
-            }
-        };
-        let _ = events.send(Event::LinkClosed(reason));
-    });
 }
 
 fn spawn_stdin_reader(events: Sender<Event>) {
@@ -179,39 +223,44 @@ struct Seen {
     last_ack: Option<Instant>,
 }
 
+struct DigiHeard {
+    packets: u32,
+    last: Instant,
+}
+
 struct Client {
     cfg: Config,
+    ui: Ui,
+    link: Link,
     mycall: String,
-    stream: TcpStream,
     next_id: u32,
     pending: Vec<Outgoing>,
     seen: HashMap<(String, String), Seen>,
+    digis: HashMap<String, DigiHeard>,
     monitor: bool,
+    raw: bool,
 }
 
 impl Client {
-    fn new(cfg: Config, stream: TcpStream) -> Self {
+    fn new(cfg: Config, link: Link) -> Self {
         // Seed ids from the clock so a restart does not reuse recent ids.
         let next_id = (unix_seconds() % 1000) as u32 + 1;
         Client {
+            ui: Ui::new(cfg.no_color),
             mycall: cfg.call.to_string(),
             monitor: cfg.monitor,
+            raw: false,
+            link,
             cfg,
-            stream,
             next_id,
             pending: Vec::new(),
             seen: HashMap::new(),
+            digis: HashMap::new(),
         }
     }
 
-    fn transmit(&mut self, info: Vec<u8>) -> io::Result<()> {
-        let frame = UiFrame {
-            dest: self.cfg.tocall.clone(),
-            src: self.cfg.call.clone(),
-            digis: self.cfg.path.iter().map(|digi| (digi.clone(), false)).collect(),
-            info,
-        };
-        self.stream.write_all(&kiss::encode(self.cfg.chan, &frame.encode()))
+    fn transmit(&mut self, info: &[u8]) -> io::Result<()> {
+        self.link.send(&self.cfg.call, &self.cfg.tocall, &self.cfg.path, info)
     }
 
     fn is_me(&self, addressee: &str) -> bool {
@@ -224,6 +273,11 @@ impl Client {
         id.to_string()
     }
 
+    fn next_deadline(&self) -> Option<Instant> {
+        let retry = self.pending.iter().map(|m| m.next_at).min();
+        [retry, self.link.next_deadline()].into_iter().flatten().min()
+    }
+
     // ---- outgoing ---------------------------------------------------------
 
     fn send_message(&mut self, to: &str, text: &str) -> io::Result<()> {
@@ -232,12 +286,12 @@ impl Client {
         let info = match aprs::format_message(&to, text, &id) {
             Ok(info) => info,
             Err(e) => {
-                println!("{} !! not sent: {e}", stamp());
+                self.ui.error(&format!("not sent: {e}"));
                 return Ok(());
             }
         };
-        self.transmit(info.clone())?;
-        println!("{} >> #{id} to {to} (1/{MAX_TRIES}): {text}", stamp());
+        self.transmit(&info)?;
+        self.ui.sent(&to, &id, text, 1, MAX_TRIES);
         self.pending.push(Outgoing {
             to,
             id,
@@ -249,11 +303,8 @@ impl Client {
         Ok(())
     }
 
-    fn next_deadline(&self) -> Option<Instant> {
-        self.pending.iter().map(|m| m.next_at).min()
-    }
-
-    fn run_retries(&mut self) -> io::Result<()> {
+    fn run_timers(&mut self) -> io::Result<()> {
+        self.link.maintain()?;
         let now = Instant::now();
         let mut i = 0;
         while i < self.pending.len() {
@@ -263,56 +314,47 @@ impl Client {
             }
             if self.pending[i].tries >= MAX_TRIES {
                 let gave_up = self.pending.remove(i);
-                println!(
-                    "{} !! #{} to {}: no ack after {} tries",
-                    stamp(),
-                    gave_up.id,
-                    gave_up.to,
-                    gave_up.tries
-                );
+                self.ui.gave_up(&gave_up.to, &gave_up.id, gave_up.tries);
                 continue;
             }
             let info = self.pending[i].info.clone();
-            self.transmit(info)?;
+            self.transmit(&info)?;
             let m = &mut self.pending[i];
             m.tries += 1;
             m.next_at = now + RETRY_BASE * 2u32.pow((m.tries - 1).min(MAX_RETRY_SHIFT));
-            println!("{} >> #{} to {} ({}/{MAX_TRIES}) retry", stamp(), m.id, m.to, m.tries);
+            self.ui.retry(&m.to, &m.id, m.tries, MAX_TRIES);
             i += 1;
         }
         Ok(())
     }
 
-    fn on_ack(&mut self, from: &str, id: &str) {
-        let found = self
+    fn take_pending(&mut self, from: &str, id: &str) -> Option<Outgoing> {
+        let pos = self
             .pending
             .iter()
-            .position(|m| m.id == id && m.to.eq_ignore_ascii_case(from));
-        if let Some(pos) = found {
-            let acked = self.pending.remove(pos);
-            let tries = if acked.tries == 1 { "try" } else { "tries" };
-            println!("{} ok #{} acked by {} after {} {tries}", stamp(), acked.id, from, acked.tries);
+            .position(|m| m.id == id && m.to.eq_ignore_ascii_case(from))?;
+        Some(self.pending.remove(pos))
+    }
+
+    fn on_ack(&mut self, from: &str, id: &str) {
+        if let Some(acked) = self.take_pending(from, id) {
+            self.ui.delivered(from, &acked.id, acked.tries);
         }
     }
 
     fn on_rej(&mut self, from: &str, id: &str) {
-        let found = self
-            .pending
-            .iter()
-            .position(|m| m.id == id && m.to.eq_ignore_ascii_case(from));
-        if let Some(pos) = found {
-            let rejected = self.pending.remove(pos);
-            println!("{} !! #{} rejected by {}", stamp(), rejected.id, from);
+        if let Some(rejected) = self.take_pending(from, id) {
+            self.ui.rejected(from, &rejected.id);
         }
     }
 
-    /// Our own frame came back through a digipeater: show who repeated it.
-    fn on_own_echo(&mut self, frame: &UiFrame, info: &[u8]) {
-        let Some(digi) = frame.repeated_by() else { return };
+    /// Our own packet came back through a digipeater: show who repeated it.
+    fn on_own_echo(&mut self, heard: &Heard, info: &[u8]) {
+        let Some(digi) = heard.repeated_by() else { return };
         let Some(Message::Text { id: Some(id), .. }) = aprs::parse_message(info) else { return };
         if let Some(m) = self.pending.iter_mut().find(|m| m.id == id) {
             if !m.heard_via.contains(&digi) {
-                println!("{} .. #{} repeated by {digi}", stamp(), m.id);
+                self.ui.repeated(&digi, &m.id);
                 m.heard_via.push(digi);
             }
         }
@@ -320,20 +362,41 @@ impl Client {
 
     // ---- incoming ---------------------------------------------------------
 
-    fn on_frame(&mut self, frame: UiFrame) -> io::Result<()> {
-        if self.monitor {
-            println!(
-                "{} {}:{}",
-                stamp(),
-                frame.header(),
-                String::from_utf8_lossy(&frame.info).trim_end()
-            );
+    fn on_link_event(&mut self, event: LinkEvent) -> io::Result<()> {
+        match event {
+            LinkEvent::Heard(heard) => self.on_heard(heard),
+            LinkEvent::Notice(notice) => {
+                if notice.contains("unverified") {
+                    self.ui.error(&format!("{notice} — wrong passcode? packets you send will be dropped"));
+                } else {
+                    self.ui.info(&notice);
+                }
+                Ok(())
+            }
+            LinkEvent::Closed(reason) => Err(io::Error::new(io::ErrorKind::ConnectionAborted, reason)),
         }
-        let (source, info) = aprs::unwrap_third_party(&frame.src.to_string(), &frame.info);
+    }
+
+    fn on_heard(&mut self, heard: Heard) -> io::Result<()> {
+        if self.raw {
+            self.ui.raw(&format!("{}:{}", heard.header(), decode::printable(&heard.info)));
+        }
+        if !heard.from_internet {
+            if let Some(digi) = heard.repeated_by() {
+                let now = Instant::now();
+                let entry = self.digis.entry(digi).or_insert(DigiHeard { packets: 0, last: now });
+                entry.packets += 1;
+                entry.last = now;
+            }
+        }
+
+        let (source, info) = aprs::unwrap_third_party(&heard.source, &heard.info);
         if source.eq_ignore_ascii_case(&self.mycall) {
-            self.on_own_echo(&frame, &info);
+            self.on_own_echo(&heard, &info);
             return Ok(());
         }
+        let route = heard.route();
+
         match aprs::parse_message(&info) {
             Some(Message::Ack { to, id }) if self.is_me(&to) => self.on_ack(&source, &id),
             Some(Message::Rej { to, id }) if self.is_me(&to) => self.on_rej(&source, &id),
@@ -341,16 +404,23 @@ impl Client {
                 if let Some(acked_id) = reply_ack {
                     self.on_ack(&source, &acked_id);
                 }
-                self.on_text(&source, &text, id.as_deref())?;
+                self.on_text(&source, &text, id.as_deref(), &route)?;
+            }
+            _ if self.monitor => {
+                let mut packet = decode::decode(heard.dest_call(), &heard.info);
+                while let Packet::ThirdParty { inner, .. } = packet {
+                    packet = *inner;
+                }
+                self.ui.monitor(&source, &packet.to_string(), &route);
             }
             _ => {}
         }
         Ok(())
     }
 
-    fn on_text(&mut self, from: &str, text: &str, id: Option<&str>) -> io::Result<()> {
+    fn on_text(&mut self, from: &str, text: &str, id: Option<&str>, route: &str) -> io::Result<()> {
         let Some(id) = id else {
-            println!("{} << {from}: {text}", stamp());
+            self.ui.incoming(from, text, None, route);
             return Ok(());
         };
 
@@ -367,12 +437,12 @@ impl Client {
         }
 
         if is_new {
-            println!("{} << {from} #{id}: {text}", stamp());
+            self.ui.incoming(from, text, Some(id), route);
         }
         if ack_due {
             match aprs::format_ack(from, id) {
-                Ok(ack) => self.transmit(ack)?,
-                Err(e) => println!("{} !! cannot ack {from}: {e}", stamp()),
+                Ok(ack) => self.transmit(&ack)?,
+                Err(e) => self.ui.error(&format!("cannot ack {from}: {e}")),
             }
         }
         Ok(())
@@ -394,15 +464,62 @@ impl Client {
                 _ => println!("usage: msg CALL text"),
             },
             "p" | "pending" => self.print_pending(),
+            "cancel" => self.cancel(rest),
+            "d" | "digis" => self.print_digis(),
             "mon" => {
                 self.monitor = !self.monitor;
-                println!("monitor {}", if self.monitor { "on" } else { "off" });
+                self.ui.info(&format!("monitor {}", on_off(self.monitor)));
+            }
+            "raw" => {
+                self.raw = !self.raw;
+                self.ui.info(&format!("raw packets {}", on_off(self.raw)));
             }
             "h" | "help" | "?" => println!("{COMMANDS}"),
             "q" | "quit" | "exit" => return Ok(false),
             other => println!("unknown command {other:?}; type help"),
         }
         Ok(true)
+    }
+
+    fn cancel(&mut self, which: &str) {
+        let which = which.trim().trim_start_matches('#');
+        if which.is_empty() {
+            println!("usage: cancel ID | cancel all");
+            return;
+        }
+        let all = which.eq_ignore_ascii_case("all");
+        let (cancelled, kept): (Vec<_>, Vec<_>) = self
+            .pending
+            .drain(..)
+            .partition(|m| all || m.id == which);
+        self.pending = kept;
+        if cancelled.is_empty() {
+            println!("no pending message #{which}; type pending to list them");
+        }
+        for m in cancelled {
+            self.ui.cancelled(&m.to, &m.id);
+        }
+    }
+
+    fn print_digis(&self) {
+        if !self.link.is_radio() {
+            println!("digipeaters are only tracked on the radio link");
+            return;
+        }
+        if self.digis.is_empty() {
+            println!("no digipeaters heard yet (only stations heard directly)");
+            return;
+        }
+        let now = Instant::now();
+        let mut heard: Vec<_> = self.digis.iter().collect();
+        heard.sort_by(|a, b| b.1.packets.cmp(&a.1.packets).then(a.0.cmp(b.0)));
+        for (call, h) in heard {
+            println!(
+                "  {call:<10} {:>4} packets, last {} s ago",
+                h.packets,
+                now.duration_since(h.last).as_secs()
+            );
+        }
     }
 
     fn print_pending(&self) {
@@ -423,7 +540,13 @@ impl Client {
     }
 }
 
-// ---------------------------------------------------------------------------
+fn on_off(flag: bool) -> &'static str {
+    if flag {
+        "on"
+    } else {
+        "off"
+    }
+}
 
 fn unix_seconds() -> u64 {
     SystemTime::now()
@@ -431,29 +554,18 @@ fn unix_seconds() -> u64 {
         .map_or(0, |d| d.as_secs())
 }
 
-fn stamp() -> String {
-    let secs = unix_seconds() % 86_400;
-    format!("{:02}:{:02}:{:02}Z", secs / 3600, secs / 60 % 60, secs % 60)
-}
+// ---------------------------------------------------------------------------
 
 fn run(cfg: Config) -> io::Result<()> {
-    let stream = TcpStream::connect(&cfg.kiss).map_err(|e| {
-        io::Error::new(e.kind(), format!("cannot reach KISS TCP port at {}: {e}", cfg.kiss))
-    })?;
-    stream.set_nodelay(true)?;
-
+    let (link, description) = open_link(&cfg)?;
     let (events_tx, events) = mpsc::channel();
-    spawn_kiss_reader(stream.try_clone()?, cfg.chan, events_tx.clone());
+    let link_tx = events_tx.clone();
+    link.spawn_reader(move |event| link_tx.send(Event::Link(event)).is_ok())?;
     spawn_stdin_reader(events_tx);
 
-    println!(
-        "{} connected to {} as {} on channel {} (type help)",
-        stamp(),
-        cfg.kiss,
-        cfg.call,
-        cfg.chan
-    );
-    let mut client = Client::new(cfg, stream);
+    let banner = format!("{} on {description} — type help", cfg.call);
+    let mut client = Client::new(cfg, link);
+    client.ui.info(&banner);
     let mut input_open = true;
     let mut linger_until: Option<Instant> = None;
 
@@ -461,7 +573,7 @@ fn run(cfg: Config) -> io::Result<()> {
         let deadline = [client.next_deadline(), linger_until].into_iter().flatten().min();
         let timeout = deadline.map_or(IDLE_WAIT, |d| d.saturating_duration_since(Instant::now()));
         match events.recv_timeout(timeout) {
-            Ok(Event::Frame(frame)) => client.on_frame(frame)?,
+            Ok(Event::Link(event)) => client.on_link_event(event)?,
             Ok(Event::Line(line)) => {
                 if !client.on_command(&line)? {
                     return Ok(());
@@ -472,15 +584,15 @@ fn run(cfg: Config) -> io::Result<()> {
                     return Ok(());
                 }
                 input_open = false;
-                println!("{} input closed; waiting for {} pending message(s)", stamp(), client.pending.len());
-            }
-            Ok(Event::LinkClosed(reason)) => {
-                return Err(io::Error::new(io::ErrorKind::ConnectionAborted, reason))
+                client.ui.info(&format!(
+                    "input closed; waiting for {} pending message(s)",
+                    client.pending.len()
+                ));
             }
             Err(RecvTimeoutError::Timeout) => {}
             Err(RecvTimeoutError::Disconnected) => return Ok(()),
         }
-        client.run_retries()?;
+        client.run_timers()?;
 
         if !input_open && client.pending.is_empty() {
             let until = *linger_until.get_or_insert_with(|| Instant::now() + LINGER);

@@ -57,10 +57,12 @@ impl Address {
     }
 
     /// Returns the address and its raw SSID byte (for the flag bits).
+    /// Lenient like Direwolf: the callsign may be empty or contain any
+    /// printable ASCII, because real stations transmit such frames.
     fn decode(field: &[u8]) -> Option<(Address, u8)> {
         let call: String = field[..6].iter().map(|&b| (b >> 1) as char).collect();
-        let call = call.trim_end();
-        if call.is_empty() || !call.bytes().all(|b| b.is_ascii_alphanumeric()) {
+        let call = call.trim();
+        if !call.bytes().all(|b| b.is_ascii_graphic()) {
             return None;
         }
         let ssid_byte = field[6];
@@ -133,45 +135,17 @@ impl UiFrame {
         let mut addresses = addresses.into_iter();
         let (dest, _) = addresses.next()?;
         let (src, _) = addresses.next()?;
+        if dest.call.is_empty() || src.call.is_empty() {
+            return None;
+        }
         Some(UiFrame {
             dest,
             src,
-            digis: addresses.collect(),
+            // Some iGate firmware inserts an empty path entry; skip it.
+            digis: addresses.filter(|(digi, _)| !digi.call.is_empty()).collect(),
             info: frame[pos + 2..].to_vec(),
         })
     }
-
-    /// TNC2 monitor header: `SRC>DEST,DIGI1,DIGI2*` (star on the last repeated hop).
-    pub fn header(&self) -> String {
-        let mut header = format!("{}>{}", self.src, self.dest);
-        let last_repeated = self.digis.iter().rposition(|(_, repeated)| *repeated);
-        for (i, (digi, _)) in self.digis.iter().enumerate() {
-            header.push(',');
-            header.push_str(&digi.to_string());
-            if Some(i) == last_repeated {
-                header.push('*');
-            }
-        }
-        header
-    }
-
-    /// The last station that actually repeated this frame, skipping generic
-    /// aliases such as WIDE1 that a digipeater marks as used.
-    pub fn repeated_by(&self) -> Option<String> {
-        self.digis
-            .iter()
-            .rev()
-            .filter(|(_, repeated)| *repeated)
-            .map(|(digi, _)| digi)
-            .find(|digi| !is_generic_alias(&digi.call))
-            .map(|digi| digi.to_string())
-    }
-}
-
-fn is_generic_alias(call: &str) -> bool {
-    ["WIDE", "TRACE", "RELAY", "TEMP", "ECHO", "GATE"]
-        .iter()
-        .any(|alias| call.starts_with(alias))
 }
 
 #[cfg(test)]
@@ -212,8 +186,9 @@ mod tests {
             info: b":EMAIL-2  :hi{1".to_vec(),
         };
         let decoded = UiFrame::decode(&frame.encode()).unwrap();
-        assert_eq!(decoded.header(), "SA0KAM-1>APZRST,SK0TM-10,WIDE1*,WIDE2-1");
-        assert_eq!(decoded.repeated_by().as_deref(), Some("SK0TM-10"));
+        assert_eq!(decoded.src, frame.src);
+        assert_eq!(decoded.dest, frame.dest);
+        assert_eq!(decoded.digis, frame.digis);
         assert_eq!(decoded.info, frame.info);
     }
 
@@ -223,6 +198,22 @@ mod tests {
             assert!(Address::parse(bad).is_err(), "{bad:?} should be rejected");
         }
         assert_eq!(addr("sa0kam-1").to_string(), "SA0KAM-1");
+    }
+
+    #[test]
+    fn accepts_frame_with_empty_path_entry() {
+        // Heard from SM0RGQ-4: SM0RGQ-4>APMI06,:}SP9DAT-7>...::SA0KAM-1 :ack785
+        let info = b"}SP9DAT-7>APLRFT,TCPIP,SM0RGQ-4*::SA0KAM-1 :ack785".to_vec();
+        let frame = UiFrame {
+            dest: addr("APMI06"),
+            src: addr("SM0RGQ-4"),
+            digis: vec![(Address { call: String::new(), ssid: 0 }, false)],
+            info: info.clone(),
+        };
+        let decoded = UiFrame::decode(&frame.encode()).expect("frame should decode");
+        assert!(decoded.digis.is_empty());
+        assert_eq!(decoded.src.to_string(), "SM0RGQ-4");
+        assert_eq!(decoded.info, info);
     }
 
     #[test]
