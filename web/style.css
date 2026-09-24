@@ -188,18 +188,38 @@ input, select {
   transition: border-color 0.2s, box-shadow 0.2s;
 }
 
+input[type="checkbox"] {
+  width: 1.05rem;
+  height: 1.05rem;
+  margin: 0;
+  padding: 0;
+  flex-shrink: 0;
+  accent-color: var(--teal);
+  border: none;
+  background: transparent;
+  box-shadow: none;
+}
+
 input:focus, select:focus {
   outline: none;
   border-color: var(--amber);
   box-shadow: 0 0 0 3px var(--glow);
 }
 
+input[type="checkbox"]:focus {
+  box-shadow: 0 0 0 3px rgba(62, 207, 191, 0.35);
+}
+
 .toggle {
   display: flex;
   align-items: center;
-  gap: 0.6rem;
+  justify-content: flex-start;
+  gap: 0.65rem;
+  width: max-content;
+  max-width: 100%;
   color: var(--muted);
   font-size: 0.95rem;
+  cursor: pointer;
 }
 
 .actions {
@@ -309,6 +329,68 @@ button.ghost {
   from { opacity: 0; transform: translateX(-4px); }
   to { opacity: 1; transform: translateX(0); }
 }
+
+.downloads {
+  margin-top: 1.75rem;
+  padding: 1.2rem 1.15rem 1.35rem;
+  border: 1px solid var(--line);
+  border-radius: 1rem;
+  background: rgba(12, 24, 36, 0.55);
+  animation: rise 1s ease both;
+  animation-delay: 0.2s;
+}
+
+.downloads h2 {
+  margin: 0 0 0.35rem;
+  font-size: 1.15rem;
+  letter-spacing: -0.03em;
+}
+
+.dl-lede {
+  margin: 0 0 1rem;
+  color: var(--muted);
+  font-size: 0.92rem;
+  line-height: 1.45;
+}
+
+.dl-lede code {
+  font-family: var(--mono);
+  font-size: 0.82rem;
+  color: var(--amber);
+}
+
+.dl-primary {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 12rem;
+  padding: 0.75rem 1.1rem;
+  border-radius: 0.65rem;
+  background: linear-gradient(135deg, var(--teal), #2aa89c);
+  color: #041512;
+  font-weight: 700;
+  text-decoration: none;
+  transition: transform 0.15s ease, filter 0.15s;
+}
+
+.dl-primary:hover { transform: translateY(-1px); filter: brightness(1.05); }
+
+.dl-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.75rem 1.1rem;
+  margin-top: 0.85rem;
+  font-family: var(--mono);
+  font-size: 0.75rem;
+  color: var(--muted);
+}
+
+.dl-meta a {
+  color: var(--amber);
+  text-decoration: none;
+}
+
+.dl-meta a:hover { text-decoration: underline; }
 
 @media (max-width: 640px) {
   main { padding-top: 2rem; }

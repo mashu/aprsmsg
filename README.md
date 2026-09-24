@@ -18,11 +18,13 @@ cargo run -- --call SA0KAM-1 --aprs-is
 msg EMAIL-2 friend@example.com Hello from APRS-IS
 ```
 
+Prebuilt binaries for Linux, macOS, and Windows are on the [Releases](https://github.com/mashu/aprsmsg/releases) page (and linked from the web app).
+
 ## Browser
 
 | Mode | WebSocket URL | Bridge? |
 | --- | --- | --- |
 | APRS-IS | `wss://ametx.com:8888` | no |
-| Direwolf | `ws://127.0.0.1:8765` | yes — `cargo run --bin aprsmsg-bridge` |
+| Direwolf | `ws://127.0.0.1:8765` | yes — download `aprsmsg-bridge` for your OS |
 
 APRS-IS from HTTPS pages needs **WSS** (browsers cannot open plain TCP `:14580`). Host spelling is **ametx.com**, not amtex. The local bridge is only for Direwolf.

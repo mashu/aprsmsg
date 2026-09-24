@@ -3,6 +3,7 @@
 pub mod aprs;
 pub mod ax25;
 pub mod client;
+pub mod clock;
 pub mod decode;
 pub mod heard;
 pub mod kiss;

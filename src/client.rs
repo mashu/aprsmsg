@@ -6,10 +6,9 @@
 use std::collections::HashMap;
 use std::time::Duration;
 
-use web_time::{SystemTime, UNIX_EPOCH};
-
 use crate::aprs::{self, Message};
 use crate::ax25::Address;
+use crate::clock;
 use crate::decode::{self, Packet};
 use crate::heard::Heard;
 
@@ -529,9 +528,7 @@ fn on_off(flag: bool) -> &'static str {
 }
 
 fn now() -> Duration {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
+    clock::now()
 }
 
 fn unix_seconds() -> u64 {

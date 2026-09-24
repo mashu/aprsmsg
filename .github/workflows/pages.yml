@@ -28,6 +28,14 @@ jobs:
           version: v0.13.1
       - name: Build wasm
         run: wasm-pack build --target web --out-dir web/pkg --no-default-features --release
+      - name: Cache-bust static assets
+        run: |
+          HASH=$(git rev-parse --short HEAD)
+          sed -i "s|aprsmsg_bg.wasm|aprsmsg_bg.wasm?v=${HASH}|g" web/pkg/aprsmsg.js
+          sed -i "s|style.css?v=[^\"]*|style.css?v=${HASH}|g" web/index.html
+          sed -i "s|app.js?v=[^\"]*|app.js?v=${HASH}|g" web/index.html
+          sed -i "s|aprsmsg.js?v=[^\"]*|aprsmsg.js?v=${HASH}|g" web/app.js
+          echo "cache bust=${HASH}"
       - name: Setup Pages
         uses: actions/configure-pages@v5
       - name: Upload artifact

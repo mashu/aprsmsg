@@ -1,0 +1,62 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: ${{ matrix.artifact }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            artifact: linux-x86_64
+            exe: ""
+          - os: windows-latest
+            artifact: windows-x86_64
+            exe: ".exe"
+          - os: macos-14
+            artifact: macos-aarch64
+            exe: ""
+          - os: macos-13
+            artifact: macos-x86_64
+            exe: ""
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Build release binaries
+        run: cargo build --release --bins --all-features
+      - name: Package
+        shell: bash
+        run: |
+          mkdir -p dist
+          cp "target/release/aprsmsg${{ matrix.exe }}" "dist/aprsmsg-${{ matrix.artifact }}${{ matrix.exe }}"
+          cp "target/release/aprsmsg-bridge${{ matrix.exe }}" "dist/aprsmsg-bridge-${{ matrix.artifact }}${{ matrix.exe }}"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: bins-${{ matrix.artifact }}
+          path: dist/*
+
+  publish:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          pattern: bins-*
+          merge-multiple: true
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          generate_release_notes: true
+          files: artifacts/*

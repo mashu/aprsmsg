@@ -1,4 +1,4 @@
-import init, { Session } from "./pkg/aprsmsg.js?v=2";
+import init, { Session } from "./pkg/aprsmsg.js?v=3";
 
 const $ = (sel) => document.querySelector(sel);
 const form = $("#connect");
@@ -9,6 +9,9 @@ const statusEl = $("#status");
 const connectBtn = $("#connect-btn");
 const disconnectBtn = $("#disconnect-btn");
 
+const RELEASE = "https://github.com/mashu/aprsmsg/releases/latest/download";
+const RELEASE_PAGE = "https://github.com/mashu/aprsmsg/releases/latest";
+
 let session = null;
 let socket = null;
 let pollTimer = null;
@@ -18,6 +21,52 @@ const DEFAULTS = {
   "aprs-is": "wss://ametx.com:8888",
   kiss: "ws://127.0.0.1:8765",
 };
+
+function detectPlatform() {
+  const ua = navigator.userAgent || "";
+  const platform = navigator.platform || "";
+  const arch =
+    navigator.userAgentData?.architecture ||
+    (/arm|aarch64/i.test(ua) ? "arm" : "x86");
+
+  if (/Win/i.test(platform) || /Windows/i.test(ua)) {
+    return {
+      label: "Windows x86_64",
+      bridge: "aprsmsg-bridge-windows-x86_64.exe",
+      cli: "aprsmsg-windows-x86_64.exe",
+    };
+  }
+  if (/Mac/i.test(platform) || /Mac OS/i.test(ua)) {
+    // Apple Silicon is the common case on current macOS; Intel link stays on “All platforms”.
+    const appleSilicon = arch === "arm" || /Macintosh/.test(ua);
+    return {
+      label: appleSilicon ? "macOS aarch64" : "macOS x86_64",
+      bridge: appleSilicon
+        ? "aprsmsg-bridge-macos-aarch64"
+        : "aprsmsg-bridge-macos-x86_64",
+      cli: appleSilicon ? "aprsmsg-macos-aarch64" : "aprsmsg-macos-x86_64",
+    };
+  }
+  return {
+    label: "Linux x86_64",
+    bridge: "aprsmsg-bridge-linux-x86_64",
+    cli: "aprsmsg-linux-x86_64",
+  };
+}
+
+function setupDownloads() {
+  const p = detectPlatform();
+  const bridge = $("#dl-bridge");
+  const cli = $("#dl-cli");
+  const all = $("#dl-all");
+  const detect = $("#dl-detect");
+  if (!bridge) return;
+  bridge.href = `${RELEASE}/${p.bridge}`;
+  bridge.textContent = `Download bridge (${p.label})`;
+  cli.href = `${RELEASE}/${p.cli}`;
+  all.href = RELEASE_PAGE;
+  detect.textContent = `Detected ${p.label}`;
+}
 
 function b64ToBytes(b64) {
   const bin = atob(b64);
@@ -78,7 +127,7 @@ function setModeUi() {
   });
   hint.textContent =
     mode === "kiss"
-      ? "bridge: cargo run --bin aprsmsg-bridge"
+      ? "download the bridge below, then Connect"
       : "APRS-IS via wss://ametx.com:8888 — no bridge";
 }
 
@@ -105,6 +154,7 @@ function disconnect() {
 function wireUi() {
   form.mode.addEventListener("change", setModeUi);
   setModeUi();
+  setupDownloads();
 
   form.addEventListener("submit", (ev) => {
     ev.preventDefault();
@@ -201,6 +251,7 @@ function wireUi() {
   });
 }
 
+setupDownloads();
 connectBtn.disabled = true;
 try {
   await init();

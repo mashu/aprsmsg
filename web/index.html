@@ -7,7 +7,7 @@
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500&family=Syne:wght@600;700;800&display=swap" rel="stylesheet">
-  <link rel="stylesheet" href="style.css?v=2">
+  <link rel="stylesheet" href="style.css?v=3">
 </head>
 <body>
   <div class="atmosphere" aria-hidden="true">
@@ -75,8 +75,19 @@
       </div>
       <div id="log" class="log" aria-live="polite"></div>
     </section>
+
+    <section class="downloads" id="downloads">
+      <h2>Desktop binaries</h2>
+      <p class="dl-lede">For Direwolf, download the KISS bridge for your machine, then point this page at <code>ws://127.0.0.1:8765</code>.</p>
+      <a id="dl-bridge" class="dl-primary" href="https://github.com/mashu/aprsmsg/releases/latest">Download bridge</a>
+      <div class="dl-meta">
+        <span id="dl-detect">Detecting OS…</span>
+        <a id="dl-all" href="https://github.com/mashu/aprsmsg/releases/latest">All platforms</a>
+        <a id="dl-cli" href="https://github.com/mashu/aprsmsg/releases/latest">CLI client</a>
+      </div>
+    </section>
   </main>
 
-  <script type="module" src="app.js?v=2"></script>
+  <script type="module" src="app.js?v=3"></script>
 </body>
 </html>
