@@ -54,6 +54,7 @@ impl Session {
         passcode_opt: Option<u16>,
         filter: &str,
         monitor: bool,
+        raw: bool,
     ) -> Result<Session, JsValue> {
         let call = Address::parse(call).map_err(|e| JsValue::from_str(&e))?;
         let tocall = Address::parse(tocall).map_err(|e| JsValue::from_str(&e))?;
@@ -82,6 +83,7 @@ impl Session {
             path,
             tocall,
             monitor,
+            raw,
             radio,
         });
         Ok(Session {
@@ -186,18 +188,19 @@ impl Session {
         if line.is_empty() {
             return Vec::new();
         }
+        let text = String::from_utf8_lossy(line);
+        let mut actions = self.client.on_wire(text.as_ref());
         if line.starts_with(b"#") {
-            let comment = String::from_utf8_lossy(&line[1..]).trim().to_owned();
-            if comment.is_empty() {
-                return Vec::new();
+            let comment = text[1..].trim().to_owned();
+            if !comment.is_empty() {
+                actions.extend(self.client.on_notice(&comment));
             }
-            // Always surface server/login remarks (verified, filter, etc.).
-            return self.client.on_notice(&comment);
+            return actions;
         }
-        match Heard::parse_tnc2(line) {
-            Some(heard) => self.client.on_heard(heard),
-            None => Vec::new(),
+        if let Some(heard) = Heard::parse_tnc2(line) {
+            actions.extend(self.client.on_heard(heard));
         }
+        actions
     }
 
     fn encode_actions(&self, actions: Vec<Action>) -> Vec<JsAction> {

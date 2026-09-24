@@ -208,7 +208,12 @@ impl Ui {
     }
 
     fn raw(&self, frame: &str) {
-        println!("{:BODY_INDENT$}{}", "", self.paint(Style::Dim, frame));
+        println!(
+            "{} {} {}",
+            self.paint(Style::Dim, &stamp()),
+            self.paint(Style::Dim, "raw"),
+            self.paint(Style::Dim, frame)
+        );
     }
 }
 

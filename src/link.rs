@@ -16,6 +16,8 @@ const MAX_LINE: usize = 1024;
 pub enum LinkEvent {
     Heard(Heard),
     Notice(String),
+    /// Exact APRS-IS line as received (for `raw` mode).
+    Wire(String),
     Closed(String),
 }
 
@@ -176,6 +178,13 @@ fn read_aprs_is(stream: TcpStream, deliver: &impl Fn(LinkEvent) -> bool) -> Stri
         }
         while matches!(line.last(), Some(b'\r' | b'\n')) {
             line.pop();
+        }
+        if line.is_empty() {
+            continue;
+        }
+        let wire = String::from_utf8_lossy(&line).into_owned();
+        if !deliver(LinkEvent::Wire(wire)) {
+            return String::new();
         }
         let event = if line.starts_with(b"#") {
             let comment = String::from_utf8_lossy(&line[1..]).trim().to_owned();

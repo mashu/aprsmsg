@@ -27,7 +27,7 @@ commands:
   pending         list messages still waiting for an ack
   cancel ID|all   stop retrying a message, e.g.  cancel 784
   mon             toggle decoded display of other stations' packets
-  raw             toggle raw packet lines under each event (debugging)
+  raw             toggle raw wire lines (every APRS-IS/KISS frame as received)
   digis           list digipeaters heard repeating packets (radio only)
   quit            exit (Ctrl-D exits once pending messages are settled)
 
@@ -40,6 +40,8 @@ pub struct ClientConfig {
     pub path: Vec<Address>,
     pub tocall: Address,
     pub monitor: bool,
+    /// Dump every received wire line / radio frame.
+    pub raw: bool,
     /// True when the link is Direwolf/KISS (digipeater tracking makes sense).
     pub radio: bool,
 }
@@ -142,7 +144,7 @@ impl Client {
         Client {
             mycall: cfg.call.to_string(),
             monitor: cfg.monitor,
-            raw: false,
+            raw: cfg.raw,
             cfg,
             next_id,
             pending: Vec::new(),
@@ -183,7 +185,8 @@ impl Client {
 
     pub fn on_heard(&mut self, heard: Heard) -> Vec<Action> {
         let mut out = Vec::new();
-        if self.raw {
+        // Radio: no separate wire dump, so show reconstructed frames when raw.
+        if self.raw && !heard.from_internet {
             out.push(Action::Ui(UiMsg::Raw(format!(
                 "{}:{}",
                 heard.header(),
@@ -243,6 +246,15 @@ impl Client {
         out
     }
 
+    /// APRS-IS line exactly as received (and unparsed lines).
+    pub fn on_wire(&mut self, line: &str) -> Vec<Action> {
+        if self.raw {
+            vec![Action::Ui(UiMsg::Raw(line.to_owned()))]
+        } else {
+            Vec::new()
+        }
+    }
+
     pub fn on_notice(&mut self, notice: &str) -> Vec<Action> {
         if notice.contains("unverified") {
             vec![Action::Ui(UiMsg::Error(format!(
@@ -279,7 +291,7 @@ impl Client {
             "raw" => {
                 self.raw = !self.raw;
                 vec![Action::Ui(UiMsg::Info(format!(
-                    "raw packets {}",
+                    "raw wire {}",
                     on_off(self.raw)
                 )))]
             }
@@ -571,6 +583,7 @@ mod tests {
             path: vec![Address::parse("WIDE1-1").unwrap()],
             tocall: Address::parse("APZRST").unwrap(),
             monitor: false,
+            raw: false,
             radio: true,
         }
     }

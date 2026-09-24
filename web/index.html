@@ -7,7 +7,7 @@
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500&family=Syne:wght@600;700;800&display=swap" rel="stylesheet">
-  <link rel="stylesheet" href="style.css?v=4">
+  <link rel="stylesheet" href="style.css?v=5">
 </head>
 <body>
   <div class="atmosphere" aria-hidden="true">
@@ -56,6 +56,10 @@
         <input name="monitor" type="checkbox">
         <span>Monitor other traffic</span>
       </label>
+      <label class="toggle span">
+        <input name="raw" type="checkbox">
+        <span>Raw wire (every APRS-IS line)</span>
+      </label>
       <div class="actions span">
         <button type="submit" id="connect-btn" disabled>Loading…</button>
         <button type="button" id="disconnect-btn" class="ghost" disabled>Disconnect</button>
@@ -88,6 +92,6 @@
     </section>
   </main>
 
-  <script type="module" src="app.js?v=4"></script>
+  <script type="module" src="app.js?v=5"></script>
 </body>
 </html>

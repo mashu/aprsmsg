@@ -1,4 +1,4 @@
-import init, { Session } from "./pkg/aprsmsg.js?v=4";
+import init, { Session } from "./pkg/aprsmsg.js?v=5";
 
 const $ = (sel) => document.querySelector(sel);
 const form = $("#connect");
@@ -174,6 +174,7 @@ function wireUi() {
     const chan = Number(form.chan.value) || 0;
     const filter = form.filter.value.trim();
     const monitor = form.monitor.checked;
+    const raw = form.raw.checked;
 
     if (mode === "aprs-is" && /127\.0\.0\.1|localhost/i.test(url)) {
       log(
@@ -189,7 +190,7 @@ function wireUi() {
     }
 
     session = runWasm(
-      () => new Session(call, mode, path, "APZRST", chan, undefined, filter, monitor)
+      () => new Session(call, mode, path, "APZRST", chan, undefined, filter, monitor, raw)
     );
     if (!session) return;
     linkMode = mode;

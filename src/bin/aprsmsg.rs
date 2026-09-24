@@ -19,7 +19,7 @@ const DEFAULT_KISS: &str = "127.0.0.1:8001";
 const DEFAULT_APRS_IS: &str = "euro.aprs2.net:14580";
 
 const USAGE: &str = "\
-usage: aprsmsg --call MYCALL [radio or internet options] [--monitor] [--no-color]
+usage: aprsmsg --call MYCALL [radio or internet options] [--monitor] [--raw] [--no-color]
 
   --call MYCALL      your callsign or callsign-SSID, e.g. SA0KAM or SA0KAM-1
                      (required; bare callsign receives messages to every SSID)
@@ -39,6 +39,7 @@ internet, no radio needed:
 common:
   --tocall T         AX.25 destination (software identifier)  (default APZRST)
   --monitor          show other stations' packets from the start
+  --raw              dump every received APRS-IS/KISS line
   --no-color         plain output (also when NO_COLOR is set or output is piped)";
 
 enum Transport {
@@ -56,6 +57,7 @@ struct Config {
     path: Vec<Address>,
     tocall: Address,
     monitor: bool,
+    raw: bool,
     no_color: bool,
 }
 
@@ -70,6 +72,7 @@ fn parse_args() -> Result<Config, String> {
     let mut filter = String::new();
     let mut tocall = String::from("APZRST");
     let mut monitor = false;
+    let mut raw = false;
     let mut no_color = false;
 
     let mut args = env::args().skip(1);
@@ -97,6 +100,7 @@ fn parse_args() -> Result<Config, String> {
             "--filter" => filter = value_of(&mut args, "--filter")?,
             "--tocall" => tocall = value_of(&mut args, "--tocall")?,
             "--monitor" => monitor = true,
+            "--raw" => raw = true,
             "--no-color" => no_color = true,
             "-h" | "--help" => {
                 println!("{USAGE}\n\n{COMMANDS}");
@@ -134,6 +138,7 @@ fn parse_args() -> Result<Config, String> {
         path,
         tocall,
         monitor,
+        raw,
         no_color,
     })
 }
@@ -211,6 +216,7 @@ fn run(cfg: Config) -> io::Result<()> {
         path: cfg.path,
         tocall: cfg.tocall,
         monitor: cfg.monitor,
+        raw: cfg.raw,
         radio,
     };
 
@@ -241,6 +247,10 @@ fn run(cfg: Config) -> io::Result<()> {
             timeout = timeout.min(linger_at.saturating_duration_since(Instant::now()));
         }
         match events.recv_timeout(timeout) {
+            Ok(Event::Link(LinkEvent::Wire(line))) => {
+                let actions = client.on_wire(&line);
+                apply_actions(actions, &client, &mut link, &ui)?;
+            }
             Ok(Event::Link(LinkEvent::Heard(heard))) => {
                 let actions = client.on_heard(heard);
                 apply_actions(actions, &client, &mut link, &ui)?;
