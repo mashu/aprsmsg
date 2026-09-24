@@ -7,8 +7,6 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use crate::client::UiMsg;
 
 const CALL_WIDTH: usize = 9;
-/// Width of "08:51:07Z ← " plus the station column and its trailing space.
-const BODY_INDENT: usize = 10 + 2 + CALL_WIDTH + 1;
 
 #[derive(Clone, Copy)]
 enum Style {
