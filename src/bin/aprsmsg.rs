@@ -7,7 +7,7 @@ use std::sync::mpsc::{self, RecvTimeoutError, Sender};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use aprsmsg::client::{Action, Client, ClientConfig, COMMANDS};
+use aprsmsg::client::{Action, Client, ClientConfig, message_group_filter, COMMANDS};
 use aprsmsg::heard::passcode;
 use aprsmsg::link::{AprsIsLogin, Link, LinkEvent};
 use aprsmsg::ui::Ui;
@@ -21,7 +21,8 @@ const DEFAULT_APRS_IS: &str = "euro.aprs2.net:14580";
 const USAGE: &str = "\
 usage: aprsmsg --call MYCALL [radio or internet options] [--monitor] [--no-color]
 
-  --call MYCALL      your callsign-SSID, e.g. SA0KAM-1        (required)
+  --call MYCALL      your callsign or callsign-SSID, e.g. SA0KAM or SA0KAM-1
+                     (required; bare callsign receives messages to every SSID)
 
 radio (default), through Direwolf:
   --kiss HOST:PORT   Direwolf KISS TCP port                   (default 127.0.0.1:8001)
@@ -121,7 +122,7 @@ fn parse_args() -> Result<Config, String> {
         Transport::Internet {
             server,
             passcode: passcode_opt.unwrap_or_else(|| passcode(&call.call)),
-            filter: format!("g/{call} {filter}").trim().to_owned(),
+            filter: message_group_filter(&call, &filter),
         }
     } else {
         Transport::Radio { kiss, chan }

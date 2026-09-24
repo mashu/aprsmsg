@@ -16,5 +16,7 @@ pub mod ui;
 #[cfg(target_arch = "wasm32")]
 mod wasm;
 
-pub use client::{Action, Client, ClientConfig, UiMsg, COMMANDS};
+pub use client::{
+    addressed_to_me, message_group_filter, Action, Client, ClientConfig, UiMsg, COMMANDS,
+};
 pub use heard::{passcode, Heard, Hop};

@@ -7,7 +7,7 @@ use serde::Serialize;
 use wasm_bindgen::prelude::*;
 
 use crate::ax25::{Address, UiFrame};
-use crate::client::{Action, Client, ClientConfig, UiMsg};
+use crate::client::{Action, Client, ClientConfig, UiMsg, message_group_filter};
 use crate::heard::{passcode, Heard};
 use crate::kiss::{self, Decoder};
 
@@ -76,7 +76,7 @@ impl Session {
         };
         let radio = matches!(mode, Mode::Kiss);
         let pass = passcode_opt.unwrap_or_else(|| passcode(&call.call));
-        let filter = format!("g/{call} {filter}").trim().to_owned();
+        let filter = message_group_filter(&call, filter);
         let client = Client::new(ClientConfig {
             call,
             path,

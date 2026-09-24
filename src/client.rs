@@ -509,7 +509,7 @@ impl Client {
     }
 
     fn is_me(&self, addressee: &str) -> bool {
-        addressee.eq_ignore_ascii_case(&self.mycall)
+        addressed_to_me(&self.cfg.call, addressee)
     }
 
     fn take_id(&mut self) -> String {
@@ -517,6 +517,32 @@ impl Client {
         self.next_id = self.next_id % 99_999 + 1;
         id.to_string()
     }
+}
+
+/// True when `addressee` is for our station.
+///
+/// With a bare callsign (`SA0KAM`, SSID 0), every SSID of that call matches
+/// (`SA0KAM`, `SA0KAM-1` … `SA0KAM-15`), which is how APRS messaging works.
+/// With an explicit SSID (`SA0KAM-1`), only that exact addressee matches.
+pub fn addressed_to_me(mine: &Address, addressee: &str) -> bool {
+    let addressee = addressee.trim();
+    if addressee.eq_ignore_ascii_case(&mine.to_string()) {
+        return true;
+    }
+    let Ok(other) = Address::parse(addressee) else {
+        return false;
+    };
+    other.call.eq_ignore_ascii_case(&mine.call) && mine.ssid == 0
+}
+
+/// APRS-IS `g/` filter so the server delivers messages to our callsign.
+pub fn message_group_filter(call: &Address, extra: &str) -> String {
+    let group = if call.ssid == 0 {
+        format!("g/{}*", call.call)
+    } else {
+        format!("g/{call}")
+    };
+    format!("{group} {extra}").trim().to_owned()
 }
 
 fn on_off(flag: bool) -> &'static str {
@@ -598,5 +624,50 @@ mod tests {
             0
         );
         assert!(second.iter().all(|a| !matches!(a, Action::Ui(UiMsg::Incoming { .. }))));
+    }
+
+    #[test]
+    fn bare_callsign_matches_all_ssids() {
+        let mine = Address::parse("SA0KAM").unwrap();
+        assert!(addressed_to_me(&mine, "SA0KAM"));
+        assert!(addressed_to_me(&mine, "SA0KAM-1"));
+        assert!(addressed_to_me(&mine, "sa0kam-9"));
+        assert!(addressed_to_me(&mine, "SA0KAM-15"));
+        assert!(!addressed_to_me(&mine, "SA0KAMX"));
+        assert!(!addressed_to_me(&mine, "SM0YOS-1"));
+
+        let mine = Address::parse("SA0KAM-1").unwrap();
+        assert!(addressed_to_me(&mine, "SA0KAM-1"));
+        assert!(addressed_to_me(&mine, "sa0kam-1"));
+        assert!(!addressed_to_me(&mine, "SA0KAM"));
+        assert!(!addressed_to_me(&mine, "SA0KAM-2"));
+    }
+
+    #[test]
+    fn message_filter_wildcards_bare_call() {
+        assert_eq!(
+            message_group_filter(&Address::parse("SA0KAM").unwrap(), ""),
+            "g/SA0KAM*"
+        );
+        assert_eq!(
+            message_group_filter(&Address::parse("SA0KAM-1").unwrap(), "r/59/18/50"),
+            "g/SA0KAM-1 r/59/18/50"
+        );
+    }
+
+    #[test]
+    fn bare_call_receives_ssid_message() {
+        let mut client = Client::new(cfg("SA0KAM"));
+        let info = aprs::format_message("SA0KAM-7", "ping", "3").unwrap();
+        let heard = Heard {
+            source: "SM0YOS-1".into(),
+            dest: "APRS".into(),
+            path: vec![],
+            info,
+            from_internet: true,
+        };
+        let actions = client.on_heard(heard);
+        assert!(actions.iter().any(|a| matches!(a, Action::Ui(UiMsg::Incoming { .. }))));
+        assert!(actions.iter().any(|a| matches!(a, Action::Send(_))));
     }
 }
