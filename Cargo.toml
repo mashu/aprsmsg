@@ -1,0 +1,11 @@
+[package]
+name = "aprsmsg"
+version = "0.1.0"
+edition = "2021"
+description = "Interactive APRS messaging client for Direwolf's KISS TCP port"
+license = "MIT"
+
+[dependencies]
+
+[profile.release]
+strip = true
