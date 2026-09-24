@@ -6,7 +6,7 @@
 use std::collections::HashMap;
 use std::time::Duration;
 
-use web_time::{Instant, SystemTime, UNIX_EPOCH};
+use web_time::{SystemTime, UNIX_EPOCH};
 
 use crate::aprs::{self, Message};
 use crate::ax25::Address;
@@ -112,18 +112,18 @@ struct Outgoing {
     id: String,
     info: Vec<u8>,
     tries: u32,
-    next_at: Instant,
+    next_at: Duration,
     heard_via: Vec<String>,
 }
 
 struct Seen {
-    first: Instant,
-    last_ack: Option<Instant>,
+    first: Duration,
+    last_ack: Option<Duration>,
 }
 
 struct DigiHeard {
     packets: u32,
-    last: Instant,
+    last: Duration,
 }
 
 pub struct Client {
@@ -172,8 +172,14 @@ impl Client {
         self.pending.len()
     }
 
-    pub fn next_deadline(&self) -> Option<Instant> {
+    pub fn next_deadline(&self) -> Option<Duration> {
         self.pending.iter().map(|m| m.next_at).min()
+    }
+
+    /// How long until [`Self::poll`] should run again.
+    pub fn time_until_deadline(&self) -> Option<Duration> {
+        let deadline = self.next_deadline()?;
+        Some(deadline.saturating_sub(now()))
     }
 
     pub fn on_heard(&mut self, heard: Heard) -> Vec<Action> {
@@ -187,7 +193,7 @@ impl Client {
         }
         if !heard.from_internet {
             if let Some(digi) = heard.repeated_by() {
-                let now = Instant::now();
+                let now = now();
                 let entry = self.digis.entry(digi).or_insert(DigiHeard {
                     packets: 0,
                     last: now,
@@ -286,7 +292,8 @@ impl Client {
         }
     }
 
-    pub fn poll(&mut self, now: Instant) -> Vec<Action> {
+    pub fn poll(&mut self) -> Vec<Action> {
+        let now = now();
         let mut out = Vec::new();
         let mut i = 0;
         while i < self.pending.len() {
@@ -331,7 +338,7 @@ impl Client {
             id: id.clone(),
             info: info.clone(),
             tries: 1,
-            next_at: Instant::now() + RETRY_BASE,
+            next_at: now() + RETRY_BASE,
             heard_via: Vec::new(),
         });
         vec![
@@ -403,8 +410,8 @@ impl Client {
             })];
         };
 
-        let now = Instant::now();
-        self.seen.retain(|_, seen| now.duration_since(seen.first) < SEEN_TTL);
+        let now = now();
+        self.seen.retain(|_, seen| now.saturating_sub(seen.first) < SEEN_TTL);
         let key = (from.to_ascii_uppercase(), id.to_owned());
         let is_new = !self.seen.contains_key(&key);
         let seen = self.seen.entry(key).or_insert(Seen {
@@ -413,7 +420,7 @@ impl Client {
         });
         let ack_due = seen
             .last_ack
-            .is_none_or(|last| now.duration_since(last) >= ACK_HOLDOFF);
+            .is_none_or(|last| now.saturating_sub(last) >= ACK_HOLDOFF);
         if ack_due {
             seen.last_ack = Some(now);
         }
@@ -470,7 +477,7 @@ impl Client {
         if self.digis.is_empty() {
             return "no digipeaters heard yet (only stations heard directly)".into();
         }
-        let now = Instant::now();
+        let now = now();
         let mut heard: Vec<_> = self.digis.iter().collect();
         heard.sort_by(|a, b| b.1.packets.cmp(&a.1.packets).then(a.0.cmp(b.0)));
         let mut lines = Vec::new();
@@ -478,7 +485,7 @@ impl Client {
             lines.push(format!(
                 "  {call:<10} {:>4} packets, last {} s ago",
                 h.packets,
-                now.duration_since(h.last).as_secs()
+                now.saturating_sub(h.last).as_secs()
             ));
         }
         lines.join("\n")
@@ -488,7 +495,7 @@ impl Client {
         if self.pending.is_empty() {
             return "no messages waiting for an ack".into();
         }
-        let now = Instant::now();
+        let now = now();
         let mut lines = Vec::new();
         for m in &self.pending {
             lines.push(format!(
@@ -496,7 +503,7 @@ impl Client {
                 m.id,
                 m.to,
                 m.tries,
-                m.next_at.saturating_duration_since(now).as_secs()
+                m.next_at.saturating_sub(now).as_secs()
             ));
         }
         lines.join("\n")
@@ -521,10 +528,14 @@ fn on_off(flag: bool) -> &'static str {
     }
 }
 
-fn unix_seconds() -> u64 {
+fn now() -> Duration {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
-        .map_or(0, |d| d.as_secs())
+        .unwrap_or_default()
+}
+
+fn unix_seconds() -> u64 {
+    now().as_secs()
 }
 
 #[cfg(test)]

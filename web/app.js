@@ -1,10 +1,11 @@
-import init, { Session } from "./pkg/aprsmsg.js";
+import init, { Session } from "./pkg/aprsmsg.js?v=2";
 
 const $ = (sel) => document.querySelector(sel);
 const form = $("#connect");
 const compose = $("#compose");
 const logEl = $("#log");
 const hint = $("#hint");
+const statusEl = $("#status");
 const connectBtn = $("#connect-btn");
 const disconnectBtn = $("#disconnect-btn");
 
@@ -13,7 +14,6 @@ let socket = null;
 let pollTimer = null;
 let keepaliveTimer = null;
 
-/** APRS-IS needs WSS (spelling: ametx, not amtex). Bridge is Direwolf only. */
 const DEFAULTS = {
   "aprs-is": "wss://ametx.com:8888",
   kiss: "ws://127.0.0.1:8765",
@@ -30,6 +30,11 @@ function stamp() {
   return new Date().toISOString().slice(11, 19) + "Z";
 }
 
+function setStatus(state, text) {
+  statusEl.dataset.state = state;
+  statusEl.textContent = text;
+}
+
 function log(kind, text) {
   const line = document.createElement("div");
   line.className = kind || "info";
@@ -42,7 +47,9 @@ function runWasm(fn) {
   try {
     return fn();
   } catch (e) {
-    log("error", String(e));
+    console.error(e);
+    log("error", e?.message || String(e));
+    setStatus("error", "error");
     return null;
   }
 }
@@ -71,8 +78,8 @@ function setModeUi() {
   });
   hint.textContent =
     mode === "kiss"
-      ? "Direwolf: run `cargo run --bin aprsmsg-bridge`, then Connect to ws://127.0.0.1:8765"
-      : "APRS-IS: Connect to wss://ametx.com:8888 (no bridge). Do not use localhost.";
+      ? "bridge: cargo run --bin aprsmsg-bridge"
+      : "APRS-IS via wss://ametx.com:8888 — no bridge";
 }
 
 function disconnect() {
@@ -87,100 +94,123 @@ function disconnect() {
   session = null;
   compose.hidden = true;
   connectBtn.disabled = false;
+  connectBtn.textContent = "Connect";
   disconnectBtn.disabled = true;
   form.querySelectorAll("input, select").forEach((el) => {
     el.disabled = false;
   });
+  setStatus("idle", "idle");
 }
 
-form.mode.addEventListener("change", setModeUi);
-setModeUi();
+function wireUi() {
+  form.mode.addEventListener("change", setModeUi);
+  setModeUi();
 
-form.addEventListener("submit", async (ev) => {
-  ev.preventDefault();
-  disconnect();
+  form.addEventListener("submit", (ev) => {
+    ev.preventDefault();
+    disconnect();
 
-  const call = form.call.value.trim();
-  const mode = form.mode.value;
-  let url = form.url.value.trim();
-  const path = form.path.value.trim() || "none";
-  const chan = Number(form.chan.value) || 0;
-  const filter = form.filter.value.trim();
-  const monitor = form.monitor.checked;
+    const call = form.call.value.trim();
+    const mode = form.mode.value;
+    let url = form.url.value.trim();
+    const path = form.path.value.trim() || "none";
+    const chan = Number(form.chan.value) || 0;
+    const filter = form.filter.value.trim();
+    const monitor = form.monitor.checked;
 
-  if (mode === "aprs-is" && /127\.0\.0\.1|localhost/i.test(url)) {
-    log(
-      "error",
-      "APRS-IS mode needs wss://ametx.com:8888 — the local bridge is only for Direwolf (KISS)."
+    if (mode === "aprs-is" && /127\.0\.0\.1|localhost/i.test(url)) {
+      log(
+        "error",
+        "APRS-IS needs wss://ametx.com:8888 — localhost is only for Direwolf."
+      );
+      url = DEFAULTS["aprs-is"];
+      form.url.value = url;
+    }
+    if (mode === "aprs-is" && url.startsWith("ws://")) {
+      log("error", "Use wss:// on HTTPS pages (not ws://).");
+      return;
+    }
+
+    session = runWasm(
+      () => new Session(call, mode, path, "APZRST", chan, undefined, filter, monitor)
     );
-    url = DEFAULTS["aprs-is"];
-    form.url.value = url;
-  }
-  if (mode === "aprs-is" && url.startsWith("ws://") && !/127\.0\.0\.1|localhost/i.test(url)) {
-    log("error", "This page is HTTPS — use wss:// (not ws://) for APRS-IS.");
-    return;
-  }
+    if (!session) return;
 
-  session = runWasm(
-    () => new Session(call, mode, path, "APZRST", chan, undefined, filter, monitor)
-  );
-  if (!session) return;
+    connectBtn.disabled = true;
+    connectBtn.textContent = "Connecting…";
+    form.querySelectorAll("input, select").forEach((el) => {
+      el.disabled = true;
+    });
+    setStatus("idle", "connecting");
 
-  connectBtn.disabled = true;
-  form.querySelectorAll("input, select").forEach((el) => {
-    el.disabled = true;
+    socket = new WebSocket(url);
+    socket.binaryType = "arraybuffer";
+
+    socket.onopen = () => {
+      log("info", `${call} ↔ ${url}`);
+      if (mode === "aprs-is") {
+        const login = runWasm(() => session.loginBytes());
+        if (login) socket.send(login);
+        keepaliveTimer = setInterval(() => {
+          if (socket?.readyState === WebSocket.OPEN) {
+            const ka = runWasm(() => session.keepaliveBytes());
+            if (ka) socket.send(ka);
+          }
+        }, 280_000);
+      }
+      compose.hidden = false;
+      disconnectBtn.disabled = false;
+      connectBtn.textContent = "Connected";
+      setStatus("live", "on air");
+      pollTimer = setInterval(() => {
+        if (session) applyActions(runWasm(() => session.poll()));
+      }, 1000);
+    };
+
+    socket.onmessage = (ev) => {
+      const bytes =
+        typeof ev.data === "string"
+          ? new TextEncoder().encode(ev.data)
+          : new Uint8Array(ev.data);
+      applyActions(runWasm(() => session.onBytes(bytes)));
+    };
+
+    socket.onerror = () => {
+      log("error", `WebSocket error: ${url}`);
+      setStatus("error", "socket error");
+    };
+    socket.onclose = () => {
+      log("info", "link closed");
+      disconnect();
+    };
   });
 
-  socket = new WebSocket(url);
-  socket.binaryType = "arraybuffer";
-
-  socket.onopen = () => {
-    log("info", `${call} connected to ${url}`);
-    if (mode === "aprs-is") {
-      const login = runWasm(() => session.loginBytes());
-      if (login) socket.send(login);
-      keepaliveTimer = setInterval(() => {
-        if (socket?.readyState === WebSocket.OPEN) {
-          const ka = runWasm(() => session.keepaliveBytes());
-          if (ka) socket.send(ka);
-        }
-      }, 280_000);
-    }
-    compose.hidden = false;
-    disconnectBtn.disabled = false;
-    pollTimer = setInterval(() => {
-      if (session) applyActions(runWasm(() => session.poll()));
-    }, 1000);
-  };
-
-  socket.onmessage = (ev) => {
-    const bytes =
-      typeof ev.data === "string"
-        ? new TextEncoder().encode(ev.data)
-        : new Uint8Array(ev.data);
-    applyActions(runWasm(() => session.onBytes(bytes)));
-  };
-
-  socket.onerror = () => log("error", `WebSocket error talking to ${url}`);
-  socket.onclose = () => {
-    log("info", "disconnected");
+  disconnectBtn.addEventListener("click", () => {
+    log("info", "disconnecting");
     disconnect();
-  };
-});
+  });
 
-disconnectBtn.addEventListener("click", () => {
-  log("info", "disconnecting");
-  disconnect();
-});
+  compose.addEventListener("submit", (ev) => {
+    ev.preventDefault();
+    if (!session) return;
+    const to = compose.to.value.trim();
+    const text = compose.text.value.trim();
+    applyActions(runWasm(() => session.onCommand(`msg ${to} ${text}`)));
+    compose.text.value = "";
+    compose.text.focus();
+  });
+}
 
-compose.addEventListener("submit", (ev) => {
-  ev.preventDefault();
-  if (!session) return;
-  const to = compose.to.value.trim();
-  const text = compose.text.value.trim();
-  applyActions(runWasm(() => session.onCommand(`msg ${to} ${text}`)));
-  compose.text.value = "";
-  compose.text.focus();
-});
-
-await init();
+connectBtn.disabled = true;
+try {
+  await init();
+  wireUi();
+  connectBtn.disabled = false;
+  connectBtn.textContent = "Connect";
+  setStatus("idle", "ready");
+} catch (e) {
+  console.error(e);
+  connectBtn.textContent = "Init failed";
+  setStatus("error", "wasm failed");
+  log("error", `WASM init failed: ${e?.message || e}`);
+}

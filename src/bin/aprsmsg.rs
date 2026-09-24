@@ -229,11 +229,16 @@ fn run(cfg: Config) -> io::Result<()> {
     let mut linger_until: Option<Instant> = None;
 
     loop {
-        let deadline = [client.next_deadline(), link.next_deadline(), linger_until]
-            .into_iter()
-            .flatten()
-            .min();
-        let timeout = deadline.map_or(IDLE_WAIT, |d| d.saturating_duration_since(Instant::now()));
+        let mut timeout = IDLE_WAIT;
+        if let Some(until_retry) = client.time_until_deadline() {
+            timeout = timeout.min(until_retry);
+        }
+        if let Some(link_at) = link.next_deadline() {
+            timeout = timeout.min(link_at.saturating_duration_since(Instant::now()));
+        }
+        if let Some(linger_at) = linger_until {
+            timeout = timeout.min(linger_at.saturating_duration_since(Instant::now()));
+        }
         match events.recv_timeout(timeout) {
             Ok(Event::Link(LinkEvent::Heard(heard))) => {
                 let actions = client.on_heard(heard);
@@ -267,7 +272,7 @@ fn run(cfg: Config) -> io::Result<()> {
         }
 
         link.maintain()?;
-        let actions = client.poll(Instant::now());
+        let actions = client.poll();
         apply_actions(actions, &client, &mut link, &ui)?;
 
         if !input_open && client.pending_count() == 0 {

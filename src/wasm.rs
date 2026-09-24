@@ -5,7 +5,6 @@
 
 use serde::Serialize;
 use wasm_bindgen::prelude::*;
-use web_time::Instant;
 
 use crate::ax25::{Address, UiFrame};
 use crate::client::{Action, Client, ClientConfig, UiMsg};
@@ -144,7 +143,7 @@ impl Session {
 
     /// Run retry timers; call about once a second while connected.
     pub fn poll(&mut self) -> Result<JsValue, JsValue> {
-        let actions = self.client.poll(Instant::now());
+        let actions = self.client.poll();
         to_js(self.encode_actions(actions))
     }
 
