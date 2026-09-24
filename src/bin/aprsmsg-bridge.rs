@@ -12,6 +12,8 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::Mutex;
 use tokio_tungstenite::accept_async;
+use tokio_tungstenite::tungstenite::protocol::frame::coding::CloseCode;
+use tokio_tungstenite::tungstenite::protocol::CloseFrame;
 use tokio_tungstenite::tungstenite::Message;
 
 const DEFAULT_LISTEN: &str = "127.0.0.1:8765";
@@ -34,6 +36,10 @@ async fn main() {
         "aprsmsg-bridge: ws://{listen_addr} → tcp://{}",
         tcp_target.as_str()
     );
+    eprintln!(
+        "aprsmsg-bridge: start Direwolf first (KISS TCP on {}) before connecting from the browser",
+        tcp_target.as_str()
+    );
 
     loop {
         let Ok((stream, peer)) = listener.accept().await else {
@@ -52,8 +58,22 @@ async fn handle_client(
     stream: TcpStream,
     tcp_addr: &str,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    let ws = accept_async(stream).await?;
-    let tcp = TcpStream::connect(tcp_addr).await?;
+    let mut ws = accept_async(stream).await?;
+    let tcp = match TcpStream::connect(tcp_addr).await {
+        Ok(tcp) => tcp,
+        Err(e) => {
+            let reason = format!(
+                "Direwolf not reachable at {tcp_addr} ({e}) — start Direwolf with KISS TCP enabled"
+            );
+            let _ = ws
+                .close(Some(CloseFrame {
+                    code: CloseCode::Error,
+                    reason: reason.clone().into(),
+                }))
+                .await;
+            return Err(reason.into());
+        }
+    };
     tcp.set_nodelay(true)?;
     let (mut tcp_rd, mut tcp_wr) = tcp.into_split();
     let (ws_tx, mut ws_rx) = ws.split();

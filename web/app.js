@@ -1,4 +1,4 @@
-import init, { Session } from "./pkg/aprsmsg.js?v=5";
+import init, { Session } from "./pkg/aprsmsg.js?v=7";
 
 const $ = (sel) => document.querySelector(sel);
 const form = $("#connect");
@@ -16,7 +16,6 @@ let session = null;
 let socket = null;
 let pollTimer = null;
 let keepaliveTimer = null;
-let linkMode = null;
 
 const DEFAULTS = {
   "aprs-is": "wss://ametx.com:8888",
@@ -108,12 +107,8 @@ function applyActions(actions) {
   if (!actions) return;
   for (const a of actions) {
     if (a.type === "send" && socket?.readyState === WebSocket.OPEN) {
-      const bytes = b64ToBytes(a.data);
-      if (linkMode === "aprs-is") {
-        socket.send(new TextDecoder().decode(bytes));
-      } else {
-        socket.send(bytes);
-      }
+      // APRS-IS WSS (javAPRSSrvr) expects binary frames, same as it sends.
+      socket.send(b64ToBytes(a.data));
     } else if (a.type === "log") {
       log(a.kind, a.text);
     } else if (a.type === "quit") {
@@ -133,7 +128,7 @@ function setModeUi() {
   });
   hint.textContent =
     mode === "kiss"
-      ? "download the bridge below, then Connect"
+      ? "start Direwolf (KISS TCP :8001), then aprsmsg-bridge, then Connect"
       : "APRS-IS via wss://ametx.com:8888 — no bridge";
 }
 
@@ -147,7 +142,6 @@ function disconnect() {
     socket = null;
   }
   session = null;
-  linkMode = null;
   compose.hidden = true;
   connectBtn.disabled = false;
   connectBtn.textContent = "Connect";
@@ -193,8 +187,6 @@ function wireUi() {
       () => new Session(call, mode, path, "APZRST", chan, undefined, filter, monitor, raw)
     );
     if (!session) return;
-    linkMode = mode;
-
     connectBtn.disabled = true;
     connectBtn.textContent = "Connecting…";
     form.querySelectorAll("input, select").forEach((el) => {
@@ -209,14 +201,11 @@ function wireUi() {
       log("info", `${call} ↔ ${url}`);
       if (mode === "aprs-is") {
         const login = runWasm(() => session.loginBytes());
-        if (login) {
-          // Text frame is accepted by javAPRSSrvr and avoids binary encoding quirks.
-          socket.send(new TextDecoder().decode(login));
-        }
+        if (login) socket.send(login);
         keepaliveTimer = setInterval(() => {
           if (socket?.readyState === WebSocket.OPEN) {
             const ka = runWasm(() => session.keepaliveBytes());
-            if (ka) socket.send(new TextDecoder().decode(ka));
+            if (ka) socket.send(ka);
           }
         }, 280_000);
       }
@@ -248,8 +237,17 @@ function wireUi() {
       log("error", `WebSocket error: ${url}`);
       setStatus("error", "socket error");
     };
-    socket.onclose = () => {
-      log("info", "link closed");
+    socket.onclose = (ev) => {
+      if (ev.reason) {
+        log("error", ev.reason);
+      } else if (mode === "kiss") {
+        log(
+          "error",
+          "link closed — is Direwolf running with KISS TCP on 127.0.0.1:8001?"
+        );
+      } else {
+        log("info", "link closed");
+      }
       disconnect();
     };
   });

@@ -191,8 +191,10 @@ impl Session {
         let text = String::from_utf8_lossy(line);
         let mut actions = self.client.on_wire(text.as_ref());
         if line.starts_with(b"#") {
+            // Match native link.rs: only logresp (and unverified) is a Notice;
+            // server keepalives are noise unless raw mode is on.
             let comment = text[1..].trim().to_owned();
-            if !comment.is_empty() {
+            if comment.starts_with("logresp") {
                 actions.extend(self.client.on_notice(&comment));
             }
             return actions;
@@ -262,7 +264,8 @@ fn ui_kind(msg: &UiMsg) -> &'static str {
 
 fn format_ui(msg: &UiMsg) -> String {
     match msg {
-        UiMsg::Info(t) | UiMsg::Error(t) | UiMsg::Print(t) | UiMsg::Raw(t) => t.clone(),
+        UiMsg::Info(t) | UiMsg::Error(t) | UiMsg::Print(t) => t.clone(),
+        UiMsg::Raw(t) => format!("raw {t}"),
         UiMsg::Sent {
             to,
             id,

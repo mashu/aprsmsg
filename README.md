@@ -27,4 +27,6 @@ Prebuilt binaries for Linux, macOS, and Windows are on the [Releases](https://gi
 | APRS-IS | `wss://ametx.com:8888` | no |
 | Direwolf | `ws://127.0.0.1:8765` | yes — download `aprsmsg-bridge` for your OS |
 
+**Direwolf setup:** start Direwolf with KISS TCP on `127.0.0.1:8001` first, then the bridge, then Connect in the browser. The bridge only proxies WebSocket → Direwolf; `Connection refused` on `:8001` means Direwolf is not listening yet.
+
 APRS-IS from HTTPS pages needs **WSS** (browsers cannot open plain TCP `:14580`). Host spelling is **ametx.com**, not amtex. The local bridge is only for Direwolf.
