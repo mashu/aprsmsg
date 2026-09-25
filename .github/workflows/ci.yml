@@ -39,10 +39,13 @@ jobs:
       - uses: taiki-e/install-action@cargo-llvm-cov
       - name: Generate coverage
         run: cargo llvm-cov --all-features --lcov --output-path lcov.info
-      - uses: codecov/codecov-action@v4
+      - name: Upload coverage reports to Codecov
+        uses: codecov/codecov-action@v5
         with:
+          token: ${{ secrets.CODECOV_TOKEN }}
+          slug: mashu/aprsmsg
           files: lcov.info
-          fail_ci_if_error: false
+          fail_ci_if_error: true
 
   wasm:
     name: wasm
